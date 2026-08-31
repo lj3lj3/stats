@@ -210,6 +210,26 @@ widget 侧拼出 `CPU_line_chart_topApp`（`line_chart` 带下划线），module
 3. 排查"图标消失"时，**先查第三方菜单栏管理工具**（Thaw/Ice/Bartender 等），再查系统层——工具按 bundleId:autosaveName 记录归属，其配置在 `defaults read com.stonerl.Thaw "MenuBarItemManager.savedSectionOrder"`
 4. stdout 日志在伪终端下仍有截断假象，勿以日志缺失判定进程 hang（sample 抓栈才是真相）
 
+### 5.9 互联网同类问题考证 — 这是 macOS Tahoe 系统级缺陷
+
+改 bundle id 解封后，对上游 issue 区做了考证，确认这不是孤例而是 **macOS 26 Tahoe 的系统性缺陷**：
+
+| Issue | 环境 | 现象 | 与本案吻合度 |
+|---|---|---|---|
+| [#2704](https://github.com/exelban/stats/issues/2704) | 26.0 + 2.11.52 | 升级 Tahoe 后全部模块消失，权限正常 | 现象一致 |
+| [#2823](https://github.com/exelban/stats/issues/2823) | 26.1 + 2.11.61 | 同上，Bartender 排除、重置无效 | 连"排除 Bartender"都一致 |
+| [#3120](https://github.com/exelban/stats/issues/3120) | 26.4 + 2.12.8 | **"not hidden, just absent"**（进程正常注册 UIElement 但条目未创建） | **完全一致**（我们 CGWindowList 零窗口同因） |
+| [#3581](https://github.com/exelban/stats/issues/3581) | 26.6.2 + 3.0.13 | 完全不显示；日志 `LSExceptions shared instance invalidated for timeout` | **环境几乎相同**；LS 超时 = LS 层紊乱实锤 |
+| [#3416](https://github.com/exelban/stats/issues/3416) | — | app 更新后 widget 消失需逐个重加，标记 Done | 佐证"覆盖安装触发" |
+
+**结论**：
+1. 触发条件 = **覆盖安装/更新**（LS 记录失效），跨 26.0~26.6 全线存在，上游至今无显式修复（无相关 fix commit）
+2. `LSExceptions timeout` 日志 + "process registers as UIElement but items absent" + "换 bundle id 立即恢复" 三条证据共同指向 **LaunchServices 对 statusItem 的持久注册缓存紊乱**
+3. 我们独立发现的 **bundle id workaround**（改 CFBundleIdentifier + 迁移 defaults + 重签 + lsregister）是社区 issue 区尚未总结出的解法
+4. Thaw 的 `com.stonerl.Thaw.MenuBarItemService` 后台服务只探测系统 app（42 条 misses，无 Stats），并非封禁者
+
+**遗留验证项**：Tahoe 新增的「系统设置 → 菜单栏」per-app 显示控制（#3120 提及）可能是封禁状态的 GUI 入口，值得在旧 bundle id 环境下复查该设置面板。
+
 ---
 
 ## 六、验证方法（可复用）
