@@ -78,6 +78,15 @@ public class CPU: Module {
     private var groupByClustersState: Bool {
         Store.shared.bool(key: "\(self.config.name)_clustersGroup", defaultValue: false)
     }
+    // 曲线 widget 的 top app 标注开关，决定进程采集是否常驻运行
+    // key 必须与 LineChart 侧的 "\(title)_\(type.rawValue)_topApp" 完全一致，故直接引用 rawValue 避免手写字符串不一致
+    private var topAppState: Bool {
+        Store.shared.bool(key: "\(self.config.name)_\(widget_t.lineChart.rawValue)_topApp", defaultValue: false)
+    }
+    // 基类的 log 为 private，此处单独取一份同名 category 的日志句柄
+    private var log: NextLog {
+        NextLog.shared.copy(category: self.config.name)
+    }
     private var systemColor: NSColor {
         let color = SColor.secondRed
         let key = Store.shared.string(key: "\(self.config.name)_systemColor", defaultValue: color.key)
@@ -146,6 +155,7 @@ public class CPU: Module {
         }
         self.processReader = ProcessReader(.CPU) { [weak self] value in
             self?.popupView.processCallback(value)
+            self?.topAppCallback(value)
         }
         self.averageLoadReader = AverageLoadReader(.CPU, popup: true) { [weak self] value in
             self?.popupView.averageCallback(value)
@@ -191,6 +201,57 @@ public class CPU: Module {
             self.limitReader,
             self.averageLoadReader
         ])
+        
+        self.syncTopAppReaderState()
+        
+        NotificationCenter.default.addObserver(self, selector: #selector(self.listenForTopAppToggle), name: .toggleTopApp, object: nil)
+    }
+    
+    // top app 开关与进程采集联动：开启时常驻轮询，关闭时退回仅在面板打开时采集
+    private func syncTopAppReaderState() {
+        guard let reader = self.processReader else { return }
+        guard self.topAppState else {
+            reader.popup = true
+            reader.pause()
+            // 关闭开关时重置采集计数，重新开启后从第一轮开始计数
+            self.topAppCalcQueue.sync { self.topAppCalcCount = 0 }
+            return
+        }
+        reader.popup = false
+        // 先 start 使 reader 进入 active 状态，setInterval 内部仅在 active 时才重建定时器
+        reader.start()
+        let interval = Store.shared.int(key: "\(self.config.name)_updateTopInterval", defaultValue: 2)
+        reader.setInterval(interval)
+        debug("top app enabled, process reader started with \(interval)s interval", log: self.log)
+    }
+    
+    @objc private func listenForTopAppToggle(_ notification: Notification) {
+        guard notification.userInfo?["module"] as? String == self.config.name else { return }
+        self.syncTopAppReaderState()
+    }
+    
+    // 采集计算次数：每 topAppCalcStride 次采集才评估一次是否需要从右侧滑入
+    private var topAppCalcCount: Int = 0
+    // 每隔多少次采集计算执行一次滑入判断
+    // 取 5：采集间隔 2s × 5 = 10s，与 widget 侧最小滑入间隔对齐，评估粒度恰好命中，不会退化成 12s
+    private let topAppCalcStride: Int = 5
+    // 保护采集计数的串行队列，Reader 回调可能来自非主线程
+    private let topAppCalcQueue = DispatchQueue(label: "eu.exelban.Stats.CPU.TopAppCalc")
+    
+    // 把占用最高的进程分发到曲线 widget，未开启标注时不下发以免无谓重绘
+    private func topAppCallback(_ list: [TopProcess]?) {
+        guard self.topAppState, let process = list?.first else { return }
+        // 累计采集次数，未达步长则跳过本轮判断
+        let reached = self.topAppCalcQueue.sync { () -> Bool in
+            self.topAppCalcCount += 1
+            return self.topAppCalcCount % self.topAppCalcStride == 0
+        }
+        guard reached else { return }
+        self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
+            if let widget = w.item as? LineChart {
+                widget.setTopApp(process)
+            }
+        }
     }
     
     private func loadCallback(_ raw: CPU_Load?) {

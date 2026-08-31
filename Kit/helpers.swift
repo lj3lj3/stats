@@ -770,6 +770,30 @@ public func removeNotification(_ id: String) {
     center.removeDeliveredNotifications(withIdentifiers: [id])
 }
 
+// 获取指定进程的父进程 pid，失败或无父进程时返回 nil
+private func parentPID(of pid: Int32) -> Int32? {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+    let ppid = info.kp_eproc.e_ppid
+    return ppid > 1 ? ppid : nil
+}
+
+// 沿进程树向上查找所属 App 的图标，用于进程自身无自定义图标的场景（如 Python、各类 Helper）
+public func ancestorAppIcon(of pid: Int) -> NSImage? {
+    var current = pid_t(pid)
+    // 最多向上查找若干层，避免异常进程树导致长时间遍历
+    for _ in 0..<8 {
+        if let app = NSRunningApplication(processIdentifier: current), let icon = app.icon {
+            return icon
+        }
+        guard let parent = parentPID(of: current) else { return nil }
+        current = parent
+    }
+    return nil
+}
+
 public struct TopProcess: Codable, Process_p {
     public var pid: Int
     public var name: String
@@ -779,10 +803,14 @@ public struct TopProcess: Codable, Process_p {
             if let app = NSRunningApplication(processIdentifier: pid_t(self.pid)), let icon = app.icon {
                 return icon
             }
+            // 进程自身无自定义图标时，使用其所属 App 的图标
+            if let icon = ancestorAppIcon(of: self.pid) {
+                return icon
+            }
             return Constants.defaultProcessIcon
         }
     }
-    
+
     public init(pid: Int, name: String, usage: Double) {
         self.pid = pid
         self.name = name
