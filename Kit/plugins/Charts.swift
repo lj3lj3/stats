@@ -624,6 +624,83 @@ public class LineChartView: ChartView {
         self.addValue(DoubleValue(value))
     }
     
+    // 曲线数据点总数，供外部获取右端索引
+    public func pointCount() -> Int {
+        self.read { self.points.count }
+    }
+
+    // 新标注的入场索引：使宽度为 offset 的图标整体位于图表右边界之外，
+    // 从完全不可见开始随曲线左移逐渐露出，实现真正的右侧滑入（主线程调用）
+    public func spawnIndex(iconOffset: CGFloat) -> Int? {
+        let state = self.read { (count: self.points.count, yLegend: self.yLegend) }
+        guard state.count > 1 else { return nil }
+        let yLegendWidth: CGFloat = state.yLegend ? 30 : 0
+        let xRatio = (self.frame.width - yLegendWidth) / CGFloat(state.count - 1)
+        guard xRatio > 0 else { return nil }
+        // 图标中心需在 chartWidth + iconOffset 处，换算为索引偏移并加 1 格余量
+        let extra = Int(((iconOffset + xRatio) / xRatio).rounded(.up))
+        return state.count - 1 + extra
+    }
+
+    // 曲线中数值最高的点的索引（保留供其他场景使用）
+    public func peakIndex() -> Int? {
+        let points = self.read { self.orderedPointsLocked() }
+        var maxValue: Double = 0
+        var maxIndex: Int? = nil
+        for (i, opt) in points.enumerated() {
+            if let p = opt, p.value > maxValue {
+                maxValue = p.value
+                maxIndex = i
+            }
+        }
+        guard maxValue > 0 else { return nil }
+        return maxIndex
+    }
+    
+    // 相邻两点的水平间距，供标注判断何时完全滚出可视区域
+    public func xStep() -> CGFloat {
+        let state = self.read { (count: self.points.count, yLegend: self.yLegend) }
+        guard state.count > 1 else { return 0 }
+        let yLegendWidth: CGFloat = state.yLegend ? 30 : 0
+        return (self.frame.width - yLegendWidth) / CGFloat(state.count - 1)
+    }
+    
+    // 返回锚定点的坐标：x 按索引计算（允许负值以平滑滚出左边界），y 按锚定时记录的数值计算
+    public func pointAt(index: Int, value: Double) -> CGPoint? {
+        let state = self.read { (
+            points: self.orderedPointsLocked(),
+            scale: self.scale,
+            fixedScale: self.fixedScale,
+            zeroValue: self.zeroValue,
+            flipY: self.flipY,
+            xLegend: self.xLegend,
+            yLegend: self.yLegend
+        ) }
+
+        guard !state.points.isEmpty else { return nil }
+
+        var maxValue: Double = 0
+        for opt in state.points {
+            if let p = opt, p.value > maxValue { maxValue = p.value }
+        }
+        guard maxValue > 0 else { return nil }
+
+        let offset: CGFloat = 1 / (NSScreen.main?.backingScaleFactor ?? 1)
+        let xLegendHeight: CGFloat = state.xLegend ? 14 : 0
+        let yLegendWidth: CGFloat = state.yLegend ? 30 : 0
+        let height: CGFloat = self.frame.height - offset - xLegendHeight
+        let chartWidth: CGFloat = self.frame.width - yLegendWidth
+        let xRatio: CGFloat = chartWidth / CGFloat(state.points.count - 1)
+
+        var y = scaleValue(scale: state.scale, value: value, maxValue: maxValue, zeroValue: state.zeroValue, maxHeight: height, limit: state.fixedScale)
+        if state.flipY { y = height - y }
+
+        return CGPoint(
+            x: yLegendWidth + CGFloat(index) * xRatio,
+            y: y + xLegendHeight
+        )
+    }
+
     public func reinit(_ num: Int = 60) {
         self.write {
             guard self.points.count != num else { return }
