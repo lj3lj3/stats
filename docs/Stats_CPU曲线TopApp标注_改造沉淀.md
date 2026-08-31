@@ -196,6 +196,20 @@ widget 侧拼出 `CPU_line_chart_topApp`（`line_chart` 带下划线），module
 - **`cp -R` 到已存在目录会嵌套**并报 `Operation not permitted` → 部署前先 `rm -rf`
 - **NextLog 走 stdout** → GUI 启动抓不到，须直接跑二进制；且重定向到文件会块缓冲，须用 `script -q` 伪终端
 
+### 5.8 bundle id 封禁 — statusItem "隐形"的终极坑（代价最高）
+
+**现象**：widget 代码全部正常执行（statusItem 创建成功、button 存在、日志无错），但菜单栏图标消失。重启电脑、清 NSStatusItem 记录、lsregister 重注册、改签名、Thaw 重置全部无效。
+
+**根因**：系统对**旧 bundle id**（`eu.exelban.Stats`）的 statusItem 进入持久失败状态——覆盖部署 + 反复强杀导致 WindowServer/LS 缓存紊乱。
+
+**破局**：改 `CFBundleIdentifier` 为新 id（`io.github.lj3lj3.Stats`）+ `defaults export/import` 迁移配置 + 重签名 + lsregister。
+
+**教训**：
+1. 二次开发的 fork 建议第一时间改 bundle id，避免与原版缓存冲突
+2. `CGWindowList` 对 ad-hoc 签名 app 的 statusItem 检测**不可靠**（可见时也可能查不到 layer=25 窗口），勿以其为唯一判据；像素 + kill-diff 才是黄金标准
+3. 排查"图标消失"时，**先查第三方菜单栏管理工具**（Thaw/Ice/Bartender 等），再查系统层——工具按 bundleId:autosaveName 记录归属，其配置在 `defaults read com.stonerl.Thaw "MenuBarItemManager.savedSectionOrder"`
+4. stdout 日志在伪终端下仍有截断假象，勿以日志缺失判定进程 hang（sample 抓栈才是真相）
+
 ---
 
 ## 六、验证方法（可复用）
@@ -302,21 +316,53 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 > `xcode-select -s` 需 sudo，用 `DEVELOPER_DIR` 环境变量绕过。
 
-### 8.2 部署
+### 8.2 部署（含签名修复，必须完整执行）
 
 ```bash
 pkill -x Stats
 rm -rf /Applications/Stats.app     # 必须先删，否则 cp -R 会嵌套
 cp -R <Release/Stats.app> /Applications/Stats.app
+# 关键：ad-hoc 签名。无签名 app 经 LaunchServices 启动时 NSStatusItem
+# 可能创建成功但不被 WindowServer 渲染（图标消失）
+codesign -s - --force --deep /Applications/Stats.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/Stats.app
 open /Applications/Stats.app
 ```
 
-### 8.3 调试配置
+### 8.3 部署后"图标消失"排查清单（按顺序）
+
+1. **第三方菜单栏管理工具**（Thaw/Ice/Bartender/Hidden Bar/Dozer）——最高频原因！
+   工具会按 bundleId:autosaveName 记录图标归属，覆盖部署后可能不再显示
+2. **杀进程像素对比法**确认归属：`screencapture` 杀前后各一张，diff 消失簇即 Stats 区域
+   （注意：图标重排会导致簇位置漂移，需对比"总宽/总像素"而非逐簇坐标）
+3. **多显示器**：widget 只在主显示器菜单栏
+4. **刘海遮挡**：图标过多被挤进刘海后
+5. **双进程残留**：反复 pkill/open 可能产生多实例，`pgrep -x Stats | wc -l` 检查
+6. **NSStatusItem 位置记录**：`defaults read eu.exelban.Stats | grep NSStatusItem`，
+   超出屏宽（如 5940 > 1728）的值可删除
+7. **bundle id 封禁**：极端情况下系统对旧 bundle id 的 statusItem 持久不渲染，
+   改 Info.plist 的 CFBundleIdentifier（如 `io.github.lj3lj3.Stats`）+ 迁移
+   `defaults export/import` + 重签名可解（本次最终采用）
+
+### 8.4 调试配置
 
 ```bash
 defaults read eu.exelban.Stats CPU_line_chart_topApp
 defaults write eu.exelban.Stats CPU_line_chart_widthScale -int 5
 ```
+
+> 注意：改 bundle id 后配置域随之变化，需 `defaults export` 旧域 → `defaults import` 新域。
+
+### 8.5 验证工具（像素级）
+
+macOS 自带 Python 受 PEP 668 保护，先建 venv：
+
+```bash
+python3 -m venv /tmp/stats_verify_venv
+/tmp/stats_verify_venv/bin/pip install pillow -i "https://mirrors.cloud.tencent.com/pypi/simple"
+```
+
+帧差法定位图表区域 + kill-diff 归属判定 + spawnIndex 反推渲染参数，三板斧详见第六章。
 
 ---
 
