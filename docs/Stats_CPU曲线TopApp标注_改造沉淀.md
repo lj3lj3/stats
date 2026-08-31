@@ -196,19 +196,34 @@ widget 侧拼出 `CPU_line_chart_topApp`（`line_chart` 带下划线），module
 - **`cp -R` 到已存在目录会嵌套**并报 `Operation not permitted` → 部署前先 `rm -rf`
 - **NextLog 走 stdout** → GUI 启动抓不到，须直接跑二进制；且重定向到文件会块缓冲，须用 `script -q` 伪终端
 
-### 5.8 bundle id 封禁 — statusItem "隐形"的终极坑（代价最高）
+### 5.8 macOS Tahoe 菜单栏 per-app 显示开关 — 图标消失的第一嫌疑（终极真相）
 
 **现象**：widget 代码全部正常执行（statusItem 创建成功、button 存在、日志无错），但菜单栏图标消失。重启电脑、清 NSStatusItem 记录、lsregister 重注册、改签名、Thaw 重置全部无效。
 
-**根因**：系统对**旧 bundle id**（`eu.exelban.Stats`）的 statusItem 进入持久失败状态——覆盖部署 + 反复强杀导致 WindowServer/LS 缓存紊乱。
+**真因**：**macOS 26 (Tahoe) 新增「系统设置 → 菜单栏」per-app 显示控制**（对应上游 issue #3120）。Stats 在该面板中被关闭后，系统在窗口管理层面直接隐藏其 statusItem——AppKit 对象存在、日志无错，但永不渲染。开关持久化在系统设置中，重启无效。
 
-**破局**：改 `CFBundleIdentifier` 为新 id（`io.github.lj3lj3.Stats`）+ `defaults export/import` 迁移配置 + 重签名 + lsregister。
+**解法**：系统设置 → 菜单栏 → 找到 Stats → 开启显示。**秒解**。
+
+**弯路记录**：曾误判为"bundle id 封禁"（换 id 碰巧显示是因为新 id 在面板中是未管控/默认开启状态），走了改 id + 迁移配置 + 重签名的弯路。证据链（CGWindowList 零窗口、LSExceptions timeout、跨版本 issue 群）都指向系统层，但没第一时间想到查 GUI 开关。
 
 **教训**：
-1. 二次开发的 fork 建议第一时间改 bundle id，避免与原版缓存冲突
-2. `CGWindowList` 对 ad-hoc 签名 app 的 statusItem 检测**不可靠**（可见时也可能查不到 layer=25 窗口），勿以其为唯一判据；像素 + kill-diff 才是黄金标准
-3. 排查"图标消失"时，**先查第三方菜单栏管理工具**（Thaw/Ice/Bartender 等），再查系统层——工具按 bundleId:autosaveName 记录归属，其配置在 `defaults read com.stonerl.Thaw "MenuBarItemManager.savedSectionOrder"`
-4. stdout 日志在伪终端下仍有截断假象，勿以日志缺失判定进程 hang（sample 抓栈才是真相）
+1. **macOS 26+ 排查"图标消失"，第一步：系统设置 → 菜单栏，确认目标 app 的开关是开着的**——30 秒排除最高频原因
+2. 二次开发的 fork 改 bundle id 仍建议做（隔离原版缓存冲突），但它是次级手段
+3. `CGWindowList` 对 statusItem 检测不可靠，像素 + kill-diff 才是黄金标准
+4. 第三方菜单栏管理工具（Thaw/Ice/Bartender）是第二嫌疑——按 bundleId:autosaveName 记录归属，配置在 `defaults read com.stonerl.Thaw "MenuBarItemManager.savedSectionOrder"`
+5. stdout 日志在伪终端下有截断假象，勿以日志缺失判定进程 hang（sample 抓栈才是真相）
+
+**上游同类问题**（确认是 Tahoe 系统级缺陷，非孤例）：
+
+| Issue | 环境 | 吻合点 |
+|---|---|---|
+| [#2704](https://github.com/exelban/stats/issues/2704) | 26.0 + 2.11.52 | 升级 Tahoe 后全部消失 |
+| [#2823](https://github.com/exelban/stats/issues/2823) | 26.1 + 2.11.61 | Bartender 排除、重置无效 |
+| [#3120](https://github.com/exelban/stats/issues/3120) | 26.4 + 2.12.8 | 首个提及该隐私控制面板的 issue |
+| [#3581](https://github.com/exelban/stats/issues/3581) | 26.6.2 + 3.0.13 | 日志 `LSExceptions shared instance invalidated for timeout` |
+| [#3416](https://github.com/exelban/stats/issues/3416) | — | 覆盖安装触发，上游标 Done |
+
+> 注：换 bundle id 作为 workaround 有效（新 id 在面板中默认放行），但正确姿势是直接开开关。
 
 ### 5.9 互联网同类问题考证 — 这是 macOS Tahoe 系统级缺陷
 
@@ -351,18 +366,19 @@ open /Applications/Stats.app
 
 ### 8.3 部署后"图标消失"排查清单（按顺序）
 
-1. **第三方菜单栏管理工具**（Thaw/Ice/Bartender/Hidden Bar/Dozer）——最高频原因！
-   工具会按 bundleId:autosaveName 记录图标归属，覆盖部署后可能不再显示
-2. **杀进程像素对比法**确认归属：`screencapture` 杀前后各一张，diff 消失簇即 Stats 区域
-   （注意：图标重排会导致簇位置漂移，需对比"总宽/总像素"而非逐簇坐标）
-3. **多显示器**：widget 只在主显示器菜单栏
-4. **刘海遮挡**：图标过多被挤进刘海后
-5. **双进程残留**：反复 pkill/open 可能产生多实例，`pgrep -x Stats | wc -l` 检查
-6. **NSStatusItem 位置记录**：`defaults read eu.exelban.Stats | grep NSStatusItem`，
+1. **系统设置 → 菜单栏：确认 Stats 开关是开的**（macOS 26 Tahoe 新增 per-app 显示控制，
+   关闭后 statusItem 永不渲染且重启无效——本次事故真因，30 秒排除）
+2. **第三方菜单栏管理工具**（Thaw/Ice/Bartender/Hidden Bar/Dozer）：
+   工具按 bundleId:autosaveName 记录图标归属，检查其隐藏列表
+3. **杀进程像素对比法**确认归属：`screencapture` 杀前后各一张，对比**总像素数**
+   （注意：不要逐簇坐标对比，图标重排会导致位置漂移产生假阴性）
+4. **多显示器**：widget 只在主显示器菜单栏
+5. **刘海遮挡**：图标过多被挤进刘海后
+6. **双进程残留**：反复 pkill/open 可能产生多实例，`pgrep -x Stats | wc -l` 检查
+7. **NSStatusItem 位置记录**：`defaults read eu.exelban.Stats | grep NSStatusItem`，
    超出屏宽（如 5940 > 1728）的值可删除
-7. **bundle id 封禁**：极端情况下系统对旧 bundle id 的 statusItem 持久不渲染，
-   改 Info.plist 的 CFBundleIdentifier（如 `io.github.lj3lj3.Stats`）+ 迁移
-   `defaults export/import` + 重签名可解（本次最终采用）
+8. **换 bundle id**（终极手段）：改 Info.plist 的 CFBundleIdentifier + `defaults export/import`
+   迁移配置 + 重签名——新 id 在系统面板中默认放行，可绕过一切持久化封禁
 
 ### 8.4 调试配置
 
