@@ -353,7 +353,9 @@ public class LineChart: WidgetWrapper {
     // 记录当前占用最高的进程：从曲线右侧边缘进入，随曲线左移滚出；同 pid 需满足冷却
     // 注意：此方法仅记录待绘制进程，实际添加 mark 和绘制由 setValue 在主线程同步完成，
     // 避免 setTopApp 异步 main.async 与 setValue 的 main.async 之间的时序竞争导致图标闪现
-    private var topAppPending: TopProcess?
+    // pending 携带阈值通过时刻的曲线值：LoadReader（1s）可能在消费前更新 _value，
+    // 用消费时刻的值会导致图标高度偏离登顶时刻（甚至趴底）
+    private var topAppPending: (process: TopProcess, value: Double)?
     
     public func setTopApp(_ newValue: TopProcess?) {
         guard let process = newValue else { return }
@@ -378,8 +380,8 @@ public class LineChart: WidgetWrapper {
             return now.timeIntervalSince(last) < self.topAppMinSpawnInterval
         }
         guard !tooSoon else { return }
-        // 记录待绘制进程，由 setValue 在主线程同步消费，消除异步时序差
-        self.queue.sync { self.topAppPending = process }
+        // 记录待绘制进程及其时的曲线值，由 setValue 在主线程同步消费，消除异步时序差
+        self.queue.sync { self.topAppPending = (process: process, value: usage) }
     }
     
     // 倍率切换后点数改变，按新旧点数比例换算已有标注的锚定索引，保持其在图表中的相对位置
@@ -399,14 +401,12 @@ public class LineChart: WidgetWrapper {
     
     // 在 setValue 的主线程回调中同步调用：先 shift 已有标注，再消费 pending 进程添加新标注
     private func consumePendingTopApp() {
-        let pending = self.queue.sync { () -> TopProcess? in
+        let pending = self.queue.sync { () -> (process: TopProcess, value: Double)? in
             guard let p = self.topAppPending else { return nil }
             self.topAppPending = nil
             return p
         }
-        guard let process = pending else { return }
-        // 二次校验占用：pending 记录到消费之间占用可能已跌破阈值
-        guard self.queue.sync(execute: { self._value }) >= self.topAppThreshold else { return }
+        guard let (process, value) = pending else { return }
         // 入场锚点：图标整体位于右边界之外，从完全不可见开始随曲线左移露出
         guard let rightIndex = self.chart.spawnIndex(iconOffset: self.topAppIconSize / 2) else { return }
         let now = Date()
@@ -414,9 +414,9 @@ public class LineChart: WidgetWrapper {
         let added: Bool = self.queue.sync {
             // 二次校验：pending 记录期间进程可能已被其他路径添加
             guard !self.topAppMarks.contains(where: { $0.process.pid == process.pid }) else { return false }
-            // 图标高度必须与曲线同域：记录登顶时刻的曲线总值（_value，全核平均 0~1），
-            // 而非单进程 %CPU（单核基准，可与全局均值严重脱节导致图标悬空）
-            self.topAppMarks.append((process: process, index: rightIndex, value: self._value))
+            // 图标高度使用 pending 携带的曲线值（阈值通过时刻的 _value）：
+            // 消费时刻的 _value 可能已被 LoadReader 更新（1s 相位差），CPU 突降时图标会趴底
+            self.topAppMarks.append((process: process, index: rightIndex, value: value))
             self.topAppLastDrawTime[process.pid] = now
             self.topAppLastSpawnTime = now
             return true
@@ -425,7 +425,7 @@ public class LineChart: WidgetWrapper {
             debug("top app mark skipped, pid=\(process.pid) name=\(process.name) already marked", log: self.log)
             return
         }
-        info("top app mark added, pid=\(process.pid) name=\(process.name) index=\(rightIndex) total=\(self.topAppMarks.count)", log: self.log)
+        info("top app mark added, pid=\(process.pid) name=\(process.name) index=\(rightIndex) value=\(String(format: "%.2f", value)) total=\(self.topAppMarks.count)", log: self.log)
     }
     
     public func setValue(_ newValue: Double) {
