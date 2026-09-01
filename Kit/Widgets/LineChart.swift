@@ -414,7 +414,9 @@ public class LineChart: WidgetWrapper {
         let added: Bool = self.queue.sync {
             // 二次校验：pending 记录期间进程可能已被其他路径添加
             guard !self.topAppMarks.contains(where: { $0.process.pid == process.pid }) else { return false }
-            self.topAppMarks.append((process: process, index: rightIndex, value: process.usage / 100))
+            // 图标高度必须与曲线同域：记录登顶时刻的曲线总值（_value，全核平均 0~1），
+            // 而非单进程 %CPU（单核基准，可与全局均值严重脱节导致图标悬空）
+            self.topAppMarks.append((process: process, index: rightIndex, value: self._value))
             self.topAppLastDrawTime[process.pid] = now
             self.topAppLastSpawnTime = now
             return true
