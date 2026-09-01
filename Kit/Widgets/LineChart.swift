@@ -312,10 +312,12 @@ public class LineChart: WidgetWrapper {
 
         for mark in marks {
             guard let point = self.chart.pointAt(index: mark.index, value: mark.value) else { continue }
-            // 图标中心对齐锚定曲线点，确保图标在曲线框内正确居中显示
+            // 图标中心对齐锚定曲线点：图标骑在曲线上，高度随负载起伏
+            // 不做 max(...,0) 截断：图表高度仅十几 pt，截断会把图标压在底部，
+            // 溢出部分交由下方 clip 自然裁切（低负载时图标下半部可见，视觉上从底部露出）
             let iconRect = NSRect(
                 x: point.x - self.topAppIconSize / 2,
-                y: max(point.y - self.topAppIconSize - 1, 0),
+                y: point.y - self.topAppIconSize / 2,
                 width: self.topAppIconSize,
                 height: self.topAppIconSize
             )
@@ -425,7 +427,7 @@ public class LineChart: WidgetWrapper {
             debug("top app mark skipped, pid=\(process.pid) name=\(process.name) already marked", log: self.log)
             return
         }
-        info("top app mark added, pid=\(process.pid) name=\(process.name) index=\(rightIndex) value=\(String(format: "%.2f", value)) total=\(self.topAppMarks.count)", log: self.log)
+        info("top app mark added, pid=\(process.pid) name=\(process.name) index=\(rightIndex) value=\(String(format: "%.2f", value)) total=\(self.topAppMarks.count) threshold=\(self.topAppThreshold)", log: self.log)
     }
     
     public func setValue(_ newValue: Double) {
