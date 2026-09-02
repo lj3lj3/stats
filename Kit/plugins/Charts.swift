@@ -198,7 +198,7 @@ public class LineChartView: ChartView {
     private var points: [DoubleValue?]
     // 与 points 同索引的 top app 占用（0~1，与曲线同值域；nil = 无数据）
     private var topUsagePoints: [Double?]
-    // 双段着色开关：下段为 top app 用量，上段为其余进程用量
+    // 双段着色开关：下段为其余进程用量（淡），上段为 top app 用量（浓）
     private var usageShading: Bool = false
     private var head: Int = 0
     private var shadowPoints: [DoubleValue?] = []
@@ -339,7 +339,7 @@ public class LineChartView: ChartView {
         let zero: CGFloat = flipY ? self.frame.height : xLegendHeight
         
         var lines: [[CGPoint]] = []
-        // 与 lines 同分段的 top app 用量线，供双段着色使用
+        // 与 lines 同分段的分界线（高度 = 总用量 − top app 用量），供双段着色使用
         var topLines: [[CGPoint]] = []
         var line: [CGPoint] = []
         var topLine: [CGPoint] = []
@@ -414,7 +414,7 @@ public class LineChartView: ChartView {
             if shading, topSeg.count == linePoints.count, let lowerGradient, let upperGradient {
                 drawUsageShading(
                     curve: linePoints,
-                    topUsage: topSeg,
+                    boundary: topSeg,
                     zero: zero,
                     lower: lowerGradient,
                     upper: upperGradient
@@ -667,33 +667,35 @@ public class LineChartView: ChartView {
         self.needsDisplay = true
     }
     
-    // 双段填充：下段（基线 → top app 用量线）为 top app 用量，
-    // 上段（top app 用量线 → 曲线）为其余进程用量，两段均为垂直渐变
+    // 双段填充（堆叠语义）：
+    // 下段（基线 → 分界线）为其余进程用量，淡色；
+    // 上段（分界线 → 曲线）为 top app 用量，浓色；两段均为垂直渐变
+    // 入参 topUsage 为分界线点位，其高度 = 总用量 − top app 用量
     private func drawUsageShading(
         curve: [CGPoint],
-        topUsage: [CGPoint],
+        boundary: [CGPoint],
         zero: CGFloat,
         lower: NSGradient,
         upper: NSGradient
     ) {
-        let n = topUsage.count
+        let n = boundary.count
         guard n >= 2, curve.count == n else { return }
         
-        // 下段：沿 top app 用量线闭合到基线
+        // 下段（其余进程用量）：沿分界线闭合到基线
         let lowerPath = NSBezierPath()
-        lowerPath.move(to: CGPoint(x: topUsage[0].x, y: zero))
-        for p in topUsage {
+        lowerPath.move(to: CGPoint(x: boundary[0].x, y: zero))
+        for p in boundary {
             lowerPath.line(to: p)
         }
-        lowerPath.line(to: CGPoint(x: topUsage[n-1].x, y: zero))
+        lowerPath.line(to: CGPoint(x: boundary[n-1].x, y: zero))
         lowerPath.close()
         lower.draw(in: lowerPath, angle: 90)
         
-        // 上段：沿 top app 用量线向右，再沿曲线向左闭合
+        // 上段（top app 用量）：沿分界线向右，再沿曲线向左闭合
         let upperPath = NSBezierPath()
-        upperPath.move(to: topUsage[0])
+        upperPath.move(to: boundary[0])
         for i in 1..<n {
-            upperPath.line(to: topUsage[i])
+            upperPath.line(to: boundary[i])
         }
         for i in stride(from: n-1, through: 0, by: -1) {
             upperPath.line(to: curve[i])
