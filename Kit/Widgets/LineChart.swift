@@ -35,6 +35,11 @@ public class LineChart: WidgetWrapper {
         KeyValue_t(key: "0.7", value: "70%"),
         KeyValue_t(key: "0.9", value: "90%")
     ]
+    // 双段着色开关：曲线按 top app 用量分两段上色
+    private var topAppShading: Bool = false
+    // 最近一次采集到的 top app 占用（占总算力比例 0~1）
+    // 曲线推进间隔（1s）快于 top app 采集间隔（2s），中间的点沿用此值以保证着色连续
+    private var topAppCurrentUsage: Double?
     // 日志 category 用 widget 标题（CPU），WidgetWrapper 未提供 log，此处直接构造
     private var log: NextLog { NextLog.shared.copy(category: self.title) }
     
@@ -152,8 +157,10 @@ public class LineChart: WidgetWrapper {
             if let threshold = Double(Store.shared.string(key: "\(self.title)_\(self.type.rawValue)_topAppThreshold", defaultValue: "\(self.topAppThreshold)")) {
                 self.topAppThreshold = threshold
             }
+            self.topAppShading = Store.shared.bool(key: "\(self.title)_\(self.type.rawValue)_topAppShading", defaultValue: self.topAppShading)
             
             self.chart.setScale(self.scaleState)
+            self.chart.setUsageShading(self.topAppShading)
             self.chart.reinit(self.effectiveHistoryCount)
             // 初始化索引换算基准，供后续倍率切换时按比例换算已有标注位置
             self.rescaleBaseline = self.effectiveHistoryCount
@@ -359,6 +366,17 @@ public class LineChart: WidgetWrapper {
     // 用消费时刻的值会导致图标高度偏离登顶时刻（甚至趴底）
     private var topAppPending: (process: TopProcess, value: Double)?
     
+    // 更新 top app 用量（占总算力比例 0~1），供双段着色使用
+    // 每次采集均调用，不受图标滑入的评估节流影响，保证着色数据连续
+    public func setTopAppUsage(_ percentUsage: Double) {
+        guard self.topAppShading else { return }
+        // ps 的 %CPU 以单核为基准，多线程进程可超过 100；
+        // 除以核数换算为占总算力比例，与曲线总占用（0~1）同值域，避免着色越界
+        let coreCount = max(Double(ProcessInfo.processInfo.processorCount), 1)
+        let ratio = min(max(percentUsage / (100.0 * coreCount), 0), 1)
+        self.queue.sync { self.topAppCurrentUsage = ratio }
+    }
+    
     public func setTopApp(_ newValue: TopProcess?) {
         guard let process = newValue else { return }
         // 阈值检查：CPU 总占用未达阈值时不滑入图标，_value 为 0~1 的总占用
@@ -431,10 +449,12 @@ public class LineChart: WidgetWrapper {
     }
     
     public func setValue(_ newValue: Double) {
+        // 双段着色所需的 top app 用量：关闭时不读取，避免无谓的锁竞争
+        let topUsage: Double? = self.topAppShading ? self.queue.sync { self.topAppCurrentUsage } : nil
         self.queue.sync {
             self._value = newValue
         }
-        self.chart.addValue(newValue)
+        self.chart.addValue(newValue, topUsage: topUsage)
         DispatchQueue.main.async(execute: { [weak self] in
             guard let self else { return }
             // 曲线前进一格，同步已有标注的锚定索引；需在主线程读取 NSView 几何
@@ -519,6 +539,10 @@ public class LineChart: WidgetWrapper {
                 action: #selector(self.toggleTopAppThreshold),
                 items: self.topAppThresholdNumbers,
                 selected: "\(self.topAppThreshold)"
+            )),
+            PreferencesRow(localizedString("Top app usage shading"), component: switchView(
+                action: #selector(self.toggleTopAppShading),
+                state: self.topAppShading
             ))
         ]))
         
@@ -590,6 +614,17 @@ public class LineChart: WidgetWrapper {
         self.topAppThreshold = value
         Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_topAppThreshold", value: key)
         // 阈值提高后，已入场的图标不追溯清理，自然随曲线滑出
+        self.display()
+    }
+    
+    @objc private func toggleTopAppShading(_ sender: NSControl) {
+        self.topAppShading = controlState(sender)
+        Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_topAppShading", value: self.topAppShading)
+        // 关闭时清空已记录的用量，避免再次开启时残留旧值
+        if !self.topAppShading {
+            self.queue.sync { self.topAppCurrentUsage = nil }
+        }
+        self.chart.setUsageShading(self.topAppShading)
         self.display()
     }
     

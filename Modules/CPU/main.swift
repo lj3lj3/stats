@@ -241,6 +241,12 @@ public class CPU: Module {
     // 把占用最高的进程分发到曲线 widget，未开启标注时不下发以免无谓重绘
     private func topAppCallback(_ list: [TopProcess]?) {
         guard self.topAppState, let process = list?.first else { return }
+        // 每次采集都同步 top app 用量（供双段着色），不受下方评估节流影响
+        self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
+            if let widget = w.item as? LineChart {
+                widget.setTopAppUsage(process.usage)
+            }
+        }
         // 累计采集次数，未达步长则跳过本轮判断
         let reached = self.topAppCalcQueue.sync { () -> Bool in
             self.topAppCalcCount += 1

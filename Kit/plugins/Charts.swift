@@ -196,6 +196,10 @@ public class LineChartView: ChartView {
     private let dateFormatter = DateFormatter()
     
     private var points: [DoubleValue?]
+    // 与 points 同索引的 top app 占用（0~1，与曲线同值域；nil = 无数据）
+    private var topUsagePoints: [Double?]
+    // 双段着色开关：下段为 top app 用量，上段为其余进程用量
+    private var usageShading: Bool = false
     private var head: Int = 0
     private var shadowPoints: [DoubleValue?] = []
     private var transparent: Bool = true
@@ -232,6 +236,7 @@ public class LineChartView: ChartView {
         animation: Bool = true
     ) {
         self.points = Array(repeating: nil, count: max(num, 1))
+        self.topUsagePoints = Array(repeating: nil, count: max(num, 1))
         self.suffix = suffix
         self.color = color
         self.scale = scale
@@ -277,8 +282,12 @@ public class LineChartView: ChartView {
         var scale: Scale = .none
         var fixedScale: Double = 1
         var zeroValue: Double = 0.01
+        var topUsageOrdered: [Double?] = []
+        var usageShading: Bool = false
         self.read {
             originalPoints = self.orderedPointsLocked()
+            topUsageOrdered = self.orderedTopUsageLocked()
+            usageShading = self.usageShading
             shadowPoints = self.shadowPoints
             transparent = self.transparent
             flipY = self.flipY
@@ -311,6 +320,15 @@ public class LineChartView: ChartView {
             gradientColor.withAlphaComponent(0.5),
             gradientColor.withAlphaComponent(1.0)
         ])
+        // 双段着色（堆叠语义）：下段为其余进程用量（淡），上段为 top app 用量（浓），均为垂直渐变
+        let lowerGradient = NSGradient(colors: [
+            color.withAlphaComponent(0.12),
+            color.withAlphaComponent(0.45)
+        ])
+        let upperGradient = NSGradient(colors: [
+            color.withAlphaComponent(0.75),
+            color.withAlphaComponent(1.0)
+        ])
         
         let offset: CGFloat = 1 / (NSScreen.main?.backingScaleFactor ?? 1)
         let xLegendHeight: CGFloat = xLegend ? 14 : 0
@@ -321,15 +339,22 @@ public class LineChartView: ChartView {
         let zero: CGFloat = flipY ? self.frame.height : xLegendHeight
         
         var lines: [[CGPoint]] = []
+        // 与 lines 同分段的 top app 用量线，供双段着色使用
+        var topLines: [[CGPoint]] = []
         var line: [CGPoint] = []
+        var topLine: [CGPoint] = []
         var list: [(value: DoubleValue, point: CGPoint)] = []
         let needList = xLegend || (isTooltipEnabled && self.cursor != nil)
+        // 双段着色需开关开启且 topUsage 序列与点数对齐
+        let shading = usageShading && topUsageOrdered.count == points.count
         
         for (i, v) in points.enumerated() {
             guard let v else {
                 if !line.isEmpty {
                     lines.append(line)
+                    topLines.append(topLine)
                     line = []
+                    topLine = []
                 }
                 continue
             }
@@ -344,16 +369,29 @@ public class LineChartView: ChartView {
                 y: y + xLegendHeight
             )
             line.append(point)
+            if shading {
+                // 堆叠语义：底部为其余进程用量（total - top），顶部为 top app 用量
+                // 无 top app 数据的点按 0 处理，确保 topLine 与 line 点数一致，
+                // 否则该段会被判定为不对齐而回退到单段填充
+                let top = i < topUsageOrdered.count ? (topUsageOrdered[i] ?? 0) : 0
+                let other = max(min(v.value - top, v.value), 0)
+                var ty = scaleValue(scale: scale, value: other, maxValue: maxValue, zeroValue: zeroValue, maxHeight: height, limit: fixedScale)
+                if flipY {
+                    ty = height - ty
+                }
+                topLine.append(CGPoint(x: point.x, y: ty + xLegendHeight))
+            }
             if needList {
                 list.append((value: v, point: point))
             }
         }
         if !line.isEmpty {
             lines.append(line)
+            topLines.append(topLine)
         }
         
         var path = NSBezierPath()
-        for linePoints in lines {
+        for (segIdx, linePoints) in lines.enumerated() {
             if linePoints.count == 1 {
                 path = NSBezierPath(ovalIn: CGRect(x: linePoints[0].x-offset, y: linePoints[0].y-offset, width: 1, height: 1))
                 lineColor.set()
@@ -372,15 +410,26 @@ public class LineChartView: ChartView {
             path.lineWidth = offset
             path.stroke()
 
-            path = path.copy() as! NSBezierPath
-            path.line(to: CGPoint(x: linePoints[linePoints.count-1].x, y: zero))
-            path.line(to: CGPoint(x: linePoints[0].x, y: zero))
-            path.close()
-            if let gradient {
-                gradient.draw(in: path, angle: 90)
+            let topSeg = segIdx < topLines.count ? topLines[segIdx] : []
+            if shading, topSeg.count == linePoints.count, let lowerGradient, let upperGradient {
+                drawUsageShading(
+                    curve: linePoints,
+                    topUsage: topSeg,
+                    zero: zero,
+                    lower: lowerGradient,
+                    upper: upperGradient
+                )
             } else {
-                gradientColor.set()
-                path.fill()
+                path = path.copy() as! NSBezierPath
+                path.line(to: CGPoint(x: linePoints[linePoints.count-1].x, y: zero))
+                path.line(to: CGPoint(x: linePoints[0].x, y: zero))
+                path.close()
+                if let gradient {
+                    gradient.draw(in: path, angle: 90)
+                } else {
+                    gradientColor.set()
+                    path.fill()
+                }
             }
         }
         
@@ -548,7 +597,8 @@ public class LineChartView: ChartView {
         return super.hitTest(point)
     }
     
-    public func addValue(_ value: DoubleValue) {
+    // topUsage 为当前 top app 的占用（0~1），用于双段着色；不传则不着色该点
+    public func addValue(_ value: DoubleValue, topUsage: Double? = nil) {
         self.write {
             let n = self.points.count
             guard n > 0 else { return }
@@ -559,12 +609,14 @@ public class LineChartView: ChartView {
                     let missing = min(Int((gap / stats.typical).rounded()) - 1, n - 1)
                     for _ in 0..<max(0, missing) {
                         self.points[self.head] = nil
+                        self.topUsagePoints[self.head] = nil
                         self.head = (self.head + 1) % n
                     }
                 }
             }
             
             self.points[self.head] = value
+            self.topUsagePoints[self.head] = topUsage
             self.head = (self.head + 1) % n
         }
         self.onMain { [weak self] in
@@ -597,6 +649,59 @@ public class LineChartView: ChartView {
         return result
     }
     
+    // 与 orderedPointsLocked 同顺序的 top app 占用序列，用于双段着色
+    private func orderedTopUsageLocked() -> [Double?] {
+        let n = self.topUsagePoints.count
+        guard n > 0 else { return [] }
+        var result: [Double?] = []
+        result.reserveCapacity(n)
+        for i in 0..<n {
+            result.append(self.topUsagePoints[(self.head + i) % n])
+        }
+        return result
+    }
+    
+    // 双段着色开关
+    public func setUsageShading(_ newValue: Bool) {
+        self.write { self.usageShading = newValue }
+        self.needsDisplay = true
+    }
+    
+    // 双段填充：下段（基线 → top app 用量线）为 top app 用量，
+    // 上段（top app 用量线 → 曲线）为其余进程用量，两段均为垂直渐变
+    private func drawUsageShading(
+        curve: [CGPoint],
+        topUsage: [CGPoint],
+        zero: CGFloat,
+        lower: NSGradient,
+        upper: NSGradient
+    ) {
+        let n = topUsage.count
+        guard n >= 2, curve.count == n else { return }
+        
+        // 下段：沿 top app 用量线闭合到基线
+        let lowerPath = NSBezierPath()
+        lowerPath.move(to: CGPoint(x: topUsage[0].x, y: zero))
+        for p in topUsage {
+            lowerPath.line(to: p)
+        }
+        lowerPath.line(to: CGPoint(x: topUsage[n-1].x, y: zero))
+        lowerPath.close()
+        lower.draw(in: lowerPath, angle: 90)
+        
+        // 上段：沿 top app 用量线向右，再沿曲线向左闭合
+        let upperPath = NSBezierPath()
+        upperPath.move(to: topUsage[0])
+        for i in 1..<n {
+            upperPath.line(to: topUsage[i])
+        }
+        for i in stride(from: n-1, through: 0, by: -1) {
+            upperPath.line(to: curve[i])
+        }
+        upperPath.close()
+        upper.draw(in: upperPath, angle: 90)
+    }
+    
     private func intervalStatsLocked() -> (lastTs: Date, typical: TimeInterval)? {
         var deltas: [TimeInterval] = []
         var prev: Date?
@@ -620,8 +725,8 @@ public class LineChartView: ChartView {
         return (lastTs, deltas[deltas.count / 2])
     }
     
-    public func addValue(_ value: Double) {
-        self.addValue(DoubleValue(value))
+    public func addValue(_ value: Double, topUsage: Double? = nil) {
+        self.addValue(DoubleValue(value), topUsage: topUsage)
     }
     
     // 曲线数据点总数，供外部获取右端索引
@@ -705,12 +810,19 @@ public class LineChartView: ChartView {
         self.write {
             guard self.points.count != num else { return }
             let ordered = self.orderedPointsLocked()
+            let orderedTop = self.orderedTopUsageLocked()
             if num < ordered.count {
                 self.points = Array(ordered.suffix(num))
+                self.topUsagePoints = Array(orderedTop.suffix(num))
             } else {
                 var arr: [DoubleValue?] = Array(repeating: nil, count: num)
                 arr.replaceSubrange((num-ordered.count)..<num, with: ordered)
                 self.points = arr
+                // top app 用量序列须与点数同步重建，否则长度不等会导致双段着色被跳过
+                var topArr: [Double?] = Array(repeating: nil, count: num)
+                let keep = min(orderedTop.count, num)
+                topArr.replaceSubrange((num-keep)..<num, with: Array(orderedTop.suffix(keep)))
+                self.topUsagePoints = topArr
             }
             self.head = 0
         }

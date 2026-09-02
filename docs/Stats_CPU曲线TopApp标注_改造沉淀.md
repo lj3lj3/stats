@@ -32,6 +32,7 @@
 | 评估节流 | 每 5 次采集评估一次（实际 5 秒/次） |
 | 阈值 | CPU 总占用低于阈值（默认 30%）不滑入新图标 |
 | 宽度 | 1x / 2x / 3x / 5x 可配，各倍率移动速度一致 |
+| **双段着色** | 曲线填充按用量堆叠染色：**上段（浓）= top app 用量，下段（淡）= 其余进程用量**，可开关（默认关） |
 
 ### 2.2 配置入口
 
@@ -39,9 +40,42 @@ Widget 右键 → Widget settings：
 
 - `Show top app`（开关）
 - `Top app threshold`（10/20/30/50/70/90%）
+- `Top app usage shading`（双段着色开关）
 - `Chart width`（1x/2x/3x/5x）
 
 Store key 前缀为 `CPU_line_chart_`（注意是 `line_chart`，带下划线，取自 `widget_t.lineChart.rawValue`）。
+
+### 2.3 双段着色设计
+
+**语义：堆叠面积图（stacked area）**
+
+```
+曲线顶部 ─────────────  ← totalUsage
+   ↑ 上段（浓）= top app 用量
+分界线 ───────────────  ← totalUsage - topUsage
+   ↑ 下段（淡）= 其余进程用量
+基线 ─────────────────
+```
+
+两段高度之和恒等于曲线高度，因此既能看出总负载，也能看出**负载是否由单个 app 主导**：top app 段越厚，说明负载越集中。
+
+**数据管道**
+
+| 环节 | 处理 |
+|---|---|
+| 采集 | `ProcessReader` 每 1s 回调 `topAppCallback`，调用 `setTopAppUsage(process.usage)` |
+| 归一化 | `usage / (100 × 核数)` → 占总算力比例（0~1，与曲线同值域） |
+| 缓存 | `LineChart.topAppCurrentUsage` 保存最近值，供 1s 曲线推进时沿用 |
+| 写入曲线 | `chart.addValue(value, topUsage:)` 同步写入 `topUsagePoints` 环形缓冲 |
+
+> 曲线推进（1s）快于 top app 采集（2s），中间的点沿用缓存值，保证着色连续。
+
+**渲染**（`drawUsageShading`）
+
+每段一个 `NSBezierPath` + 一个两 stop 的 `NSGradient`（`angle: 90` 垂直渐变），共两次 `draw`：
+
+- 下段：基线 → 分界线，alpha `0.12 → 0.45`（淡）
+- 上段：分界线 → 曲线，alpha `0.75 → 1.0`（浓）
 
 ---
 
@@ -244,6 +278,30 @@ widget 侧拼出 `CPU_line_chart_topApp`（`line_chart` 带下划线），module
 4. Thaw 的 `com.stonerl.Thaw.MenuBarItemService` 后台服务只探测系统 app（42 条 misses，无 Stats），并非封禁者
 
 **遗留验证项**：Tahoe 新增的「系统设置 → 菜单栏」per-app 显示控制（#3120 提及）可能是封禁状态的 GUI 入口，值得在旧 bundle id 环境下复查该设置面板。
+
+### 5.10 双段着色的三个连环坑
+
+实现双段着色时连续踩了三个坑，且**每个都表现为"功能静默失效"（无报错、无崩溃）**：
+
+**坑 1：`reinit` 未同步 topUsage 数组**
+
+`LineChartView.reinit()` 只重建 `points`，新增的 `topUsagePoints` 未同步 → 两者长度不等（180 vs 60）→ `shading = usageShading && topUsageOrdered.count == points.count` 恒为 false，直接回退单段填充。
+
+**坑 2：topUsage 为 nil 的点未计入，导致分段不对齐**
+
+初版仅在 `topUsage != nil` 时 append 到 `topLine`，导致 `topSeg.count != linePoints.count` → 再次回退单段。
+
+修复：nil 按 0 处理并 append，**保证 topLine 与 line 点数一致**。
+
+**坑 3：堆叠方向理解偏差**
+
+初版把分界线画在 `scaleValue(topUsage)` 处（下段 = top app），但需求是**堆叠语义**：top app 用量应堆在**顶部**。
+
+修正：分界线改画在 `total - top` 处（下段 = 其余进程），并交换两段配色（上段浓、下段淡）。
+
+**排查方法（关键）**：这类"渲染静默失效"必须靠**运行时日志定位**——在渲染分支内加一行 `debug` 输出，立刻能确认是否进入分支；再输出关键几何值（`topY`、`curveY`、`zero`）即可定位方向/长度问题。纯读代码看不出来。
+
+**值域提醒**：`TopProcess.usage` 来自 `ps` 的 %CPU，**以单核为基准，多线程进程可远超 100**。必须除以核数换算为占总算力比例，否则会与曲线值域（0~1）脱节——这正是 5.8 之前"图标趴底"同源的值域陷阱。
 
 ---
 
