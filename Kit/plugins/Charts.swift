@@ -322,8 +322,8 @@ public class LineChartView: ChartView {
         ])
         // 双段着色（堆叠语义）：下段为其余进程用量（淡），上段为 top app 用量（浓），均为垂直渐变
         let lowerGradient = NSGradient(colors: [
-            color.withAlphaComponent(0.12),
-            color.withAlphaComponent(0.45)
+            color.withAlphaComponent(0.35),
+            color.withAlphaComponent(0.7)
         ])
         let upperGradient = NSGradient(colors: [
             color.withAlphaComponent(0.75),
