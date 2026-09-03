@@ -272,6 +272,6 @@ public class ProcessReader: Reader<[TopProcess]> {
             name = "Docker"
         }
         
-        return TopProcess(pid: pid, name: name, usage: usage * Double(1000 * 1000))
+        return TopProcess(pid: pid, name: name, usage: usage * Double(1000 * 1000), command: command)
     }
 }

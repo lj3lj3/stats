@@ -809,23 +809,77 @@ public struct TopProcess: Codable, Process_p {
     public var pid: Int
     public var name: String
     public var usage: Double
+    // ps 输出的完整命令行，首段为可执行文件路径
+    // 来源：各模块 reader 解析 ps 输出时按 pid/usage 裁剪后的剩余部分
+    public var command: String = ""
     public var icon: NSImage {
-        get {
-            if let app = NSRunningApplication(processIdentifier: pid_t(self.pid)), let icon = app.icon {
-                return icon
-            }
-            // 进程自身无自定义图标时，使用其所属 App 的图标
-            if let icon = ancestorAppIcon(of: self.pid) {
-                return icon
-            }
-            return Constants.defaultProcessIcon
-        }
+        TopProcess.resolveIcon(pid: self.pid).image
+    }
+    // 图标是否不能直接代表该进程：Launch Services 会把子进程错归属到 Console/Terminal 等前台 App，
+    // 此类图标与真实进程不匹配；又或者从 ancestor 路径解析到的图标，无法保证是进程自身图标
+    // 计算属性：与 icon 共享同一次解析路径，访问时一并确定
+    public var iconIsAmbiguous: Bool {
+        TopProcess.resolveIcon(pid: self.pid).ambiguous
     }
 
     public init(pid: Int, name: String, usage: Double) {
+        self.init(pid: pid, name: name, usage: usage, command: "")
+    }
+
+    public init(pid: Int, name: String, usage: Double, command: String) {
         self.pid = pid
         self.name = name
         self.usage = usage
+        self.command = command
+    }
+
+    // Launch Services 常把无 bundle 的进程误归属到前台 App（如 Console、Terminal），
+    // 这些 bundle ID 列入黑名单后，图标会被视为不可信，需在视图层叠加角标辅助识别
+    private static let misattributionBundleIDs: Set<String> = [
+        "com.apple.Console",
+        "com.apple.Terminal",
+    ]
+
+    // 单次解析图标来源：返回 (图像, 是否歧义)
+    // 解析优先级：进程自身 → 进程树祖先 → 默认 bash 图标
+    // 仅当进程无法定位到自身/祖先、或直接命中已知误归属源时才视为歧义：
+    // ancestor 命中意味着所属 App 已识别（Xcode/Safari 等），其图标本身可识别，
+    // 因此祖先命中不触发歧义判定
+    private static func resolveIcon(pid: Int) -> (image: NSImage, ambiguous: Bool) {
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)), let icon = app.icon {
+            return (icon, Self.isMisattributionSource(app))
+        }
+        if let icon = ancestorAppIcon(of: pid) {
+            return (icon, false)
+        }
+        return (Constants.defaultProcessIcon, true)
+    }
+
+    // 判断 NSRunningApplication 是否为已知误归属源：bundle ID 为空或命中黑名单即视为歧义
+    private static func isMisattributionSource(_ app: NSRunningApplication) -> Bool {
+        guard let bid = app.bundleIdentifier else { return true }
+        return Self.misattributionBundleIDs.contains(bid)
+    }
+
+    // 可执行文件 basename：Launch Services 常把无 bundle 的进程误归属到前台 App，
+    // name 会失真为「Console」等，此处以 ps 的可执行文件路径为准还原真实进程
+    public var executableName: String {
+        guard !self.command.isEmpty else { return self.name }
+        let token = self.command.split(separator: " ").first ?? ""
+        let base = token.split(separator: "/").last ?? ""
+        return base.isEmpty ? self.name : String(base)
+    }
+
+    // 角标字母：取可执行文件名的首个字母或数字，用于区分图标相同的不同进程
+    public var badgeLetter: String {
+        let first = self.executableName.uppercased().first(where: { $0.isLetter || $0.isNumber })
+        return first.map(String.init) ?? "?"
+    }
+
+    // 悬停提示：可执行文件名 + pid + 完整命令行，供定位图标相同的进程
+    public var tooltipText: String {
+        let header = "\(self.executableName) (PID \(self.pid))"
+        return self.command.isEmpty ? header : "\(header)\n\(self.command)"
     }
 }
 

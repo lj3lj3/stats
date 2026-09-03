@@ -54,6 +54,10 @@ public class LineChart: WidgetWrapper {
     private var topAppLastSpawnTime: Date?
     // 任意两个图标滑入的最小间隔（秒），决定图表内图标总数上限
     private let topAppMinSpawnInterval: TimeInterval = 10
+    // 每次绘制刷新的图标矩形（图表坐标系），叠加 topAppChartOrigin 即为视图坐标
+    private var topAppIconRects: [(pid: Int, rect: NSRect)] = []
+    // draw() 中 context.translateBy 的偏移量，用于把图标矩形换算到视图坐标系
+    private var topAppChartOrigin: CGPoint = .zero
     
     private var chart: LineChartView = LineChartView(frame: NSRect(
         x: 0,
@@ -191,10 +195,36 @@ public class LineChart: WidgetWrapper {
             let str = NSAttributedString.init(string: "\(char)", attributes: stringAttributes)
             self.NSLabelCharts.append(str)
         }
+        
+        self.registerTopAppToolTip()
     }
     
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+    
+    // 宽度由 draw() 末尾的 setWidth 驱动，尺寸变化后需按新 bounds 重新登记 tooltip 矩形
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        self.registerTopAppToolTip()
+    }
+    
+    // 登记覆盖整个视图的 tooltip 矩形：AppKit 的 tooltip 是独立窗口，
+    // 不会被菜单栏几十 pt 的视图边界裁切，故不采用自绘提示框方案
+    // 矩形固定不变，避免每秒重登记导致已显示的 tooltip 被反复打断
+    private func registerTopAppToolTip() {
+        self.removeAllToolTips()
+        self.addToolTip(self.bounds, owner: self, userData: nil)
+    }
+    
+    // 按鼠标位置命中图标矩形，返回该进程的可执行文件名、pid 与完整命令行
+    // point 为视图坐标系，图标矩形需叠加 topAppChartOrigin 平移量后再比较
+    @objc(view:stringForToolTip:point:userData:)
+    public func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
+        return self.queue.sync {
+            guard let hit = self.topAppIconRects.first(where: { $0.rect.contains(point) }) else { return "" }
+            return self.topAppMarks.first(where: { $0.process.pid == hit.pid })?.process.tooltipText ?? ""
+        }
     }
     
     public override func draw(_ dirtyRect: NSRect) {
@@ -286,6 +316,8 @@ public class LineChart: WidgetWrapper {
         
         context.saveGState()
         context.translateBy(x: x+offset+lineWidth, y: offset)
+        // 记录平移量：图标绘制于平移后坐标系，命中测试需叠加此偏移换算回视图坐标
+        self.topAppChartOrigin = CGPoint(x: x+offset+lineWidth, y: offset)
         
         let chartSize = NSSize(
             width: box.bounds.width - (offset*2+lineWidth),
@@ -315,7 +347,12 @@ public class LineChart: WidgetWrapper {
     private func drawTopAppMarks() {
         var marks: [(process: TopProcess, index: Int, value: Double)] = []
         self.queue.sync { marks = self.topAppMarks }
-        guard !marks.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        // 命中矩形直接换算为视图坐标，tooltip 回调无需再依赖平移量
+        // 无论是否绘制出图标都刷新，保证已滑出的图标不再响应 tooltip
+        let origin = self.topAppChartOrigin
+        var rects: [(pid: Int, rect: NSRect)] = []
+        defer { self.queue.sync { self.topAppIconRects = rects } }
 
         for mark in marks {
             guard let point = self.chart.pointAt(index: mark.index, value: mark.value) else { continue }
@@ -328,12 +365,40 @@ public class LineChart: WidgetWrapper {
                 width: self.topAppIconSize,
                 height: self.topAppIconSize
             )
+            rects.append((pid: mark.process.pid, rect: iconRect.offsetBy(dx: origin.x, dy: origin.y)))
             // 裁剪到曲线可视区域内，滚出左边缘时图标被逐步裁掉而非整体消失
             context.saveGState()
             context.clip(to: CGRect(origin: .zero, size: self.chart.frame.size))
             mark.process.icon.draw(in: iconRect)
+            self.drawTopAppBadge(for: mark.process, iconRect: iconRect)
             context.restoreGState()
         }
+    }
+    
+    // 图标中心叠加可执行文件首字母，用于识别被误归属的图标（如多个 Console 图标实际是不同进程）
+    // 仅当 process.iconIsAmbiguous 为 true 时绘制：真实 app 图标本身可识别，不需要叠加
+    private func drawTopAppBadge(for process: TopProcess, iconRect: NSRect) {
+        guard process.iconIsAmbiguous else { return }
+        let letter = process.badgeLetter
+        // 段落居中：draw(in:) 默认按 rect 顶部左对齐，需显式设置 .center 让字符水平居中
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: style,
+        ]
+        let text = NSAttributedString(string: letter, attributes: attrs)
+        let textSize = text.size()
+        // 不绘制背景圆：图标本身仍是主体，字母仅作为辅助识别，
+        // 直接以白字叠加，深色图标上可见，浅色图标上由用户借助 tooltip 识别
+        let center = CGPoint(x: iconRect.midX, y: iconRect.midY)
+        text.draw(in: NSRect(
+            x: iconRect.origin.x,
+            y: center.y - textSize.height / 2,
+            width: iconRect.width,
+            height: textSize.height
+        ))
     }
     
     // 清空已绘制标注、各进程冷却记录及全局滑入计时

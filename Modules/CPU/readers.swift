@@ -241,7 +241,7 @@ public class ProcessReader: Reader<[TopProcess]> {
                     name = "Docker"
                 }
                 
-                processes.append(TopProcess(pid: pid, name: name, usage: usage))
+                processes.append(TopProcess(pid: pid, name: name, usage: usage, command: command))
             }
             
             if index == self.numberOfProcesses { stop = true }

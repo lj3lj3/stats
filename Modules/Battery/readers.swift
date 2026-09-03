@@ -262,7 +262,7 @@ public class ProcessReader: Reader<[TopProcess]> {
                     name = n
                 }
                 
-                processes.append(TopProcess(pid: pid, name: name, usage: usage))
+                processes.append(TopProcess(pid: pid, name: name, usage: usage, command: command))
             }
         }
         
