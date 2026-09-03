@@ -58,6 +58,8 @@ public class LineChart: WidgetWrapper {
     private var topAppIconRects: [(pid: Int, rect: NSRect)] = []
     // draw() 中 context.translateBy 的偏移量，用于把图标矩形换算到视图坐标系
     private var topAppChartOrigin: CGPoint = .zero
+    // 已登记的 tooltip 矩形快照：与实时图标矩形比较，判断重建是否会打断显示中的提示
+    private var topAppTooltipRects: [NSRect] = []
     
     private var chart: LineChartView = LineChartView(frame: NSRect(
         x: 0,
@@ -196,29 +198,59 @@ public class LineChart: WidgetWrapper {
             self.NSLabelCharts.append(str)
         }
         
-        self.registerTopAppToolTip()
     }
     
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
     
-    // 宽度由 draw() 末尾的 setWidth 驱动，尺寸变化后需按新 bounds 重新登记 tooltip 矩形
+    // 宽度由 draw() 末尾的 setWidth 驱动，尺寸变化后需按新几何重新登记 tooltip 矩形
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        self.registerTopAppToolTip()
+        self.syncTopAppToolTips()
     }
     
-    // 登记覆盖整个视图的 tooltip 矩形：AppKit 的 tooltip 是独立窗口，
-    // 不会被菜单栏几十 pt 的视图边界裁切，故不采用自绘提示框方案
-    // 矩形固定不变，避免每秒重登记导致已显示的 tooltip 被反复打断
-    private func registerTopAppToolTip() {
+    // 光标在视图坐标系中的位置：由全局鼠标位置换算，无需依赖 tracking area 事件
+    private func cursorLocationInView() -> NSPoint? {
+        guard let window = self.window else { return nil }
+        let screenPoint = NSEvent.mouseLocation
+        let windowPoint = window.convertFromScreen(NSRect(origin: screenPoint, size: .zero)).origin
+        return self.convert(windowPoint, from: nil)
+    }
+    
+    // 每个图标登记独立的 tooltip 矩形：AppKit 对同一个 tag 只取一次内容，
+    // 鼠标在同一矩形内移动不会重新询问，共用一个大矩形会导致切换到其他图标时
+    // 仍显示首个图标的提示；一图标一矩形才能在图标之间移动时取到对应进程信息
+    private func syncTopAppToolTips() {
+        let live = self.queue.sync { self.topAppIconRects }
+        var skip = false
+        if let point = self.cursorLocationInView() {
+            let overLive = live.contains { $0.rect.contains(point) }
+            let overRegistered = self.topAppTooltipRects.contains { $0.contains(point) }
+            // 仅在光标同时落在实时图标与已登记矩形内时跳过重建：
+            // 此时 AppKit 很可能正在显示 tooltip，重建会打断显示
+            // 其余情况（图标已滑走、登记矩形已漂移）都必须重建，否则 tooltip 不再触发
+            skip = overLive && overRegistered
+        }
+        guard !skip else { return }
+        
         self.removeAllToolTips()
-        self.addToolTip(self.bounds, owner: self, userData: nil)
+        var registered: [NSRect] = []
+        // 图标绘制时被裁剪到图表可视区（入场在右边界外、滑出在左边界外均不可见），
+        // tooltip 矩形必须做同样的裁剪，否则会对着看不见的图标区域触发提示
+        let visible = NSRect(origin: self.topAppChartOrigin, size: self.chart.frame.size)
+        for item in live {
+            let rect = item.rect.intersection(visible)
+            // 完全不可见或仅剩极窄一条时不登记，避免误触
+            guard rect.width >= 2, rect.height >= 2 else { continue }
+            registered.append(rect)
+            self.addToolTip(rect, owner: self, userData: nil)
+        }
+        self.topAppTooltipRects = registered
     }
     
     // 按鼠标位置命中图标矩形，返回该进程的可执行文件名、pid 与完整命令行
-    // point 为视图坐标系，图标矩形需叠加 topAppChartOrigin 平移量后再比较
+    // point 为视图坐标系；内容取实时图标矩形，故登记矩形漂移时仍能给出正确进程
     @objc(view:stringForToolTip:point:userData:)
     public func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
         return self.queue.sync {
@@ -528,6 +560,9 @@ public class LineChart: WidgetWrapper {
                 // 同步消费待绘制进程：在 shift 之后、display 之前添加新标注到最右端，
                 // 确保图标从右边缘开始，避免 setTopApp 异步 main.async 与此处的时序竞争
                 self.consumePendingTopApp()
+                // 在 draw 之外刷新 tooltip 矩形：removeAllToolTips 不宜在绘制过程中调用，
+                // 此处沿用上一帧的图标位置，1pt 级误差不影响命中
+                self.syncTopAppToolTips()
             }
             self.needsDisplay = true
         })
