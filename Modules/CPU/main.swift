@@ -238,9 +238,33 @@ public class CPU: Module {
     // 保护采集计数的串行队列，Reader 回调可能来自非主线程
     private let topAppCalcQueue = DispatchQueue(label: "eu.exelban.Stats.CPU.TopAppCalc")
     
-    // 把占用最高的进程分发到曲线 widget，未开启标注时不下发以免无谓重绘
+    // 按责任 pid 聚合同一 App 的多个进程，返回总占用最高的 App
+    // VS Code、Chrome 等现代应用普遍多进程，仅取单进程 top1 会严重低估其真实占用：
+    // 例如 VS Code 的 5 个进程各占 8%，单看 top1 只有 8%，聚合后才是 40%
+    // 代表进程取组内占用最高者，保留其命令行供 tooltip 展示具体是哪个子进程在跑；
+    // pid 换成责任 pid 使图标直接解析到所属 App，与 RAM 模块聚合逻辑保持一致
+    private func aggregateTopProcess(_ list: [TopProcess]) -> TopProcess? {
+        var groups: [Int: [TopProcess]] = [:]
+        for process in list {
+            groups[responsiblePID(process.pid), default: []].append(process)
+        }
+        
+        var candidates: [TopProcess] = []
+        for (responsiblePid, members) in groups {
+            guard var representative = members.max(by: { $0.usage < $1.usage }) else { continue }
+            representative.usage = members.reduce(0) { $0 + $1.usage }
+            representative.pid = responsiblePid
+            if let app = NSRunningApplication(processIdentifier: pid_t(responsiblePid)), let appName = app.localizedName {
+                representative.name = appName
+            }
+            candidates.append(representative)
+        }
+        return candidates.max(by: { $0.usage < $1.usage })
+    }
+    
+    // 把占用最高的 App 分发到曲线 widget，未开启标注时不下发以免无谓重绘
     private func topAppCallback(_ list: [TopProcess]?) {
-        guard self.topAppState, let process = list?.first else { return }
+        guard self.topAppState, let list, let process = self.aggregateTopProcess(list) else { return }
         // 每次采集都同步 top app 用量（供双段着色），不受下方评估节流影响
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
             if let widget = w.item as? LineChart {

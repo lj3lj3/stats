@@ -791,6 +791,25 @@ private func parentPID(of pid: Int32) -> Int32? {
     return ppid > 1 ? ppid : nil
 }
 
+// responsibility_get_pid_responsible_for_pid 的符号：私有 API，需运行时动态解析
+private typealias DynResponsiblePidFunc = @convention(c) (CInt) -> CInt
+
+private let dynResponsiblePidFunc: UnsafeMutableRawPointer? = {
+    let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -1), "responsibility_get_pid_responsible_for_pid")
+    if symbol == nil {
+        error("Error loading responsibility_get_pid_responsible_for_pid")
+    }
+    return symbol
+}()
+
+// 返回对指定子进程负责的进程 pid（通常为启动它的 App），失败或无归属时回退为原 pid
+// 用于把同一 App 的多个进程（主进程 + Helper/Renderer）归为一组统计总占用
+public func responsiblePID(_ childPid: Int) -> Int {
+    guard let symbol = dynResponsiblePidFunc else { return childPid }
+    let responsiblePid = unsafeBitCast(symbol, to: DynResponsiblePidFunc.self)(CInt(childPid))
+    return responsiblePid == -1 ? childPid : Int(responsiblePid)
+}
+
 // 沿进程树向上查找所属 App 的图标，用于进程自身无自定义图标的场景（如 Python、各类 Helper）
 public func ancestorAppIcon(of pid: Int) -> NSImage? {
     var current = pid_t(pid)

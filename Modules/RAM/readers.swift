@@ -114,8 +114,6 @@ public class ProcessReader: Reader<[TopProcess]> {
         get { Store.shared.bool(key: "\(self.title)_combinedProcesses", defaultValue: false) }
     }
     
-    private typealias dynGetResponsiblePidFuncType = @convention(c) (CInt) -> CInt
-    
     public override func setup() {
         self.popup = true
         self.setInterval(Store.shared.int(key: "\(self.title)_updateTopInterval", defaultValue: 1))
@@ -172,7 +170,7 @@ public class ProcessReader: Reader<[TopProcess]> {
         
         var processGroups: [String: [TopProcess]] = [:]
         for process in processes {
-            let responsiblePid = ProcessReader.getResponsiblePid(process.pid)
+            let responsiblePid = responsiblePID(process.pid)
             let groupKey = "\(responsiblePid)"
             
             if processGroups[groupKey] != nil {
@@ -188,7 +186,7 @@ public class ProcessReader: Reader<[TopProcess]> {
             let firstProcess = processes.first!
             let name: String
             
-            if let app = NSRunningApplication(processIdentifier: pid_t(ProcessReader.getResponsiblePid(firstProcess.pid))),
+            if let app = NSRunningApplication(processIdentifier: pid_t(responsiblePID(firstProcess.pid))),
                let appName = app.localizedName {
                 name = appName
             } else {
@@ -196,33 +194,15 @@ public class ProcessReader: Reader<[TopProcess]> {
             }
             
             result.append(TopProcess(
-                pid: ProcessReader.getResponsiblePid(firstProcess.pid),
+                pid: responsiblePID(firstProcess.pid),
                 name: name,
-                usage: totalUsage
+                usage: totalUsage,
+                command: firstProcess.command
             ))
         }
         
         result.sort { $0.usage > $1.usage }
         self.callback(Array(result.prefix(self.numberOfProcesses)))
-    }
-    
-    private static let dynGetResponsiblePidFunc: UnsafeMutableRawPointer? = {
-        let result = dlsym(UnsafeMutableRawPointer(bitPattern: -1), "responsibility_get_pid_responsible_for_pid")
-        if result == nil {
-            error("Error loading responsibility_get_pid_responsible_for_pid")
-        }
-        return result
-    }()
-    
-    static func getResponsiblePid(_ childPid: Int) -> Int {
-        guard ProcessReader.dynGetResponsiblePidFunc != nil else {
-            return childPid
-        }
-        let responsiblePid = unsafeBitCast(ProcessReader.dynGetResponsiblePidFunc, to: dynGetResponsiblePidFuncType.self)(CInt(childPid))
-        guard responsiblePid != -1 else {
-            return childPid
-        }
-        return Int(responsiblePid)
     }
     
     static public func parseProcess(_ raw: String) -> TopProcess {
