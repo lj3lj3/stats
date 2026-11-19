@@ -21,11 +21,49 @@ internal class LoadReader: Reader<CPU_Load> {
     private let CPUUsageLock: NSLock = NSLock()
     private var previousInfo = host_cpu_load_info()
     private var hasHyperthreadingCores = false
+    // 唤醒后跳过下一次读取的差值计算：prev 状态来自休眠前，差值无意义且会假报 ~100%
+    // 首次读仅刷新 prev 基准、不下发数据，UI 保持休眠前最后一帧（1s 后恢复正常采样）
+    private var skipNextRead: Bool = false
     
     private var response: CPU_Load = CPU_Load()
     private var numCPUsU: natural_t = 0
     private var usagePerCore: [Double] = []
     private var cores: [core_s]? = nil
+    
+    override init(_ module: ModuleType, popup: Bool = false, preview: Bool = false, history: Bool = false, callback: @escaping (CPU_Load?) -> Void = {_ in }) {
+        super.init(module, popup: popup, preview: preview, history: history, callback: callback)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(self.didWake),
+            name: NSWorkspace.didWakeNotification, object: nil
+        )
+    }
+    
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+    
+    @objc private func didWake() {
+        self.skipNextRead = true
+    }
+    
+    // 用本次采集到的 tick 重建 prev 基准，丢弃休眠前的 prev（差值无意义）
+    // 不下发数据：调用方 callback(nil) 表示本轮无更新，UI 冻结一帧后正常恢复
+    private func refreshBaselineAfterWake() {
+        let result: kern_return_t = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
+        if result == KERN_SUCCESS {
+            if let prev = self.prevCpuInfo {
+                let size = MemoryLayout<integer_t>.stride * Int(self.numPrevCpuInfo)
+                vm_deallocate(mach_task_self_, vm_address_t(bitPattern: prev), vm_size_t(size))
+            }
+            self.prevCpuInfo = self.cpuInfo
+            self.numPrevCpuInfo = self.numCpuInfo
+            self.cpuInfo = nil
+            self.numCpuInfo = 0
+        }
+        if let info = hostCPULoadInfo() {
+            self.previousInfo = info
+        }
+    }
     
     public override func setup() {
         self.hasHyperthreadingCores = sysctlByName("hw.physicalcpu") != sysctlByName("hw.logicalcpu")
@@ -40,6 +78,14 @@ internal class LoadReader: Reader<CPU_Load> {
     }
     
     public override func read() {
+        // 唤醒后首次读：刷新 prev 基准但不计算差值，避免休眠期间 tick 累计导致假峰值
+        if self.skipNextRead {
+            self.refreshBaselineAfterWake()
+            self.skipNextRead = false
+            self.callback(nil)
+            return
+        }
+        
         let result: kern_return_t = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
         if result == KERN_SUCCESS {
             self.CPUUsageLock.lock()
