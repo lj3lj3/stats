@@ -48,8 +48,9 @@ internal class LoadReader: Reader<CPU_Load> {
     
     // 用本次采集到的 tick 重建 prev 基准，丢弃休眠前的 prev（差值无意义）
     // 不下发数据：调用方 callback(nil) 表示本轮无更新，UI 冻结一帧后正常恢复
+    // 调用方已持有 CPUUsageLock，本方法不再自行加锁
     private func refreshBaselineAfterWake() {
-        let result: kern_return_t = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
+        let result: kern_return_t = host_processor_info(machHostPort, PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
         if result == KERN_SUCCESS {
             if let prev = self.prevCpuInfo {
                 let size = MemoryLayout<integer_t>.stride * Int(self.numPrevCpuInfo)
@@ -78,17 +79,19 @@ internal class LoadReader: Reader<CPU_Load> {
     }
     
     public override func read() {
+        self.CPUUsageLock.lock()
+        
         // 唤醒后首次读：刷新 prev 基准但不计算差值，避免休眠期间 tick 累计导致假峰值
         if self.skipNextRead {
             self.refreshBaselineAfterWake()
             self.skipNextRead = false
+            self.CPUUsageLock.unlock()
             self.callback(nil)
             return
         }
         
-        let result: kern_return_t = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
+        let result: kern_return_t = host_processor_info(machHostPort, PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
         if result == KERN_SUCCESS {
-            self.CPUUsageLock.lock()
             self.usagePerCore = []
             
             if let prevCpuInfo = self.prevCpuInfo {
@@ -109,8 +112,6 @@ internal class LoadReader: Reader<CPU_Load> {
                     }
                 }
             }
-            self.CPUUsageLock.unlock()
-            
             let showHyperthratedCores = Store.shared.bool(key: "CPU_hyperhreading", defaultValue: false)
             if showHyperthratedCores || !self.hasHyperthreadingCores {
                 self.response.usagePerCore = self.usagePerCore
@@ -144,6 +145,7 @@ internal class LoadReader: Reader<CPU_Load> {
         
         let cpuInfo = hostCPULoadInfo()
         if cpuInfo == nil {
+            self.CPUUsageLock.unlock()
             self.callback(nil)
             return
         }
@@ -201,7 +203,9 @@ internal class LoadReader: Reader<CPU_Load> {
             }
         }
         
-        self.callback(self.response)
+        let response = self.response
+        self.CPUUsageLock.unlock()
+        self.callback(response)
     }
     
     private func hostCPULoadInfo() -> host_cpu_load_info? {
@@ -211,7 +215,7 @@ internal class LoadReader: Reader<CPU_Load> {
         
         let result: kern_return_t = withUnsafeMutablePointer(to: &cpuLoadInfo) {
             $0.withMemoryRebound(to: integer_t.self, capacity: count) {
-                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &size)
+                host_statistics(machHostPort, HOST_CPU_LOAD_INFO, $0, &size)
             }
         }
         if result != KERN_SUCCESS {
@@ -232,6 +236,7 @@ public class ProcessReader: Reader<[TopProcess]> {
     
     public override func setup() {
         self.popup = true
+        self.preview = true
         self.setInterval(Store.shared.int(key: "\(self.title)_updateTopInterval", defaultValue: 1))
     }
     
@@ -310,7 +315,7 @@ public class TemperatureReader: Reader<Double> {
         self.list = ["Tp1h", "Tp1t", "Tp1p", "Tp1l", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0X", "Tp0b", "Tp0f", "Tp0j"]
         case .m3, .m3Pro, .m3Max, .m3Ultra:
             self.list = ["Te05", "Te0L", "Te0P", "Te0S", "Tf04", "Tf09", "Tf0A", "Tf0B", "Tf0D", "Tf0E", "Tf44", "Tf49", "Tf4A", "Tf4B", "Tf4D", "Tf4E"]
-        case .m4, .m4Pro, .m4Max, .m4Ultra:
+        case .m4, .m4Pro, .m4Max:
             self.list = ["Te05", "Te09", "Te0H", "Te0S", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0V", "Tp0Y", "Tp0b", "Tp0e"]
         case .m5, .m5Pro, .m5Max, .m5Ultra:
             self.list = ["Tp00", "Tp04", "Tp08", "Tp0C", "Tp0G", "Tp0K", "Tp0O", "Tp0R", "Tp0U", "Tp0X", "Tp0a", "Tp0d", "Tp0g", "Tp0j", "Tp0m", "Tp0p", "Tp0u", "Tp0y"]
@@ -335,12 +340,12 @@ public class TemperatureReader: Reader<Double> {
             var total: Double = 0
             var counter: Double = 0
             self.list.forEach { (key: String) in
-                if let value = SMC.shared.getValue(key) {
+                if let value = SMC.shared.getValue(key), value >= 10 && value <= 120 {
                     total += value
                     counter += 1
                 }
             }
-            if total != 0 && counter != 0 {
+            if counter != 0 {
                 temperature = total / counter
             }
         }
@@ -413,15 +418,15 @@ public class FrequencyReader: Reader<CPU_Frequency> {
                 
                 for sample in samples {
                     guard sample.group == "CPU Stats" else { continue }
-                    if sample.channel.contains("ECPU") {
-                        eCore.append(self.calculateFrequencies(dict: sample.delta, freqs: self.eCoreFreqs))
+                    if sample.channel.contains("ECPU"), let frequency = self.calculateFrequencies(dict: sample.delta, freqs: self.eCoreFreqs) {
+                        eCore.append(frequency)
                     }
-                    if sample.channel.contains(self.sCoreCount == 0 ? "PCPU" : "MCPU") {
-                        pCore.append(self.calculateFrequencies(dict: sample.delta, freqs: self.pCoreFreqs))
+                    if sample.channel.contains(self.sCoreCount == 0 ? "PCPU" : "MCPU"), let frequency = self.calculateFrequencies(dict: sample.delta, freqs: self.pCoreFreqs) {
+                        pCore.append(frequency)
                     }
                     if self.sCoreCount != 0 {
-                        if sample.channel.contains("PCPU") {
-                            sCore.append(self.calculateFrequencies(dict: sample.delta, freqs: self.sCoreFreqs))
+                        if sample.channel.contains("PCPU"), let frequency = self.calculateFrequencies(dict: sample.delta, freqs: self.sCoreFreqs) {
+                            sCore.append(frequency)
                         }
                     }
                 }
@@ -463,9 +468,10 @@ public class FrequencyReader: Reader<CPU_Frequency> {
         }
     }
     
-    private func calculateFrequencies(dict: CFDictionary, freqs: [Int32]) -> Double {
+    private func calculateFrequencies(dict: CFDictionary, freqs: [Int32]) -> Double? {
+        guard !freqs.isEmpty else { return nil }
         let items = self.getResidencies(dict: dict)
-        guard let offset = items.firstIndex(where: { $0.0 != "IDLE" && $0.0 != "DOWN" && $0.0 != "OFF" }) else { return 0 }
+        guard let offset = items.firstIndex(where: { $0.0 != "IDLE" && $0.0 != "DOWN" && $0.0 != "OFF" }), items.count - offset == freqs.count else { return nil }
         let usage = items.dropFirst(offset).reduce(0.0) { $0 + Double($1.f) }
         let count = freqs.count
         var avgFreq: Double = 0

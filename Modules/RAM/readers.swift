@@ -21,7 +21,7 @@ internal class UsageReader: Reader<RAM_Usage> {
         
         let kerr: kern_return_t = withUnsafeMutablePointer(to: &stats) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_info(mach_host_self(), HOST_BASIC_INFO, $0, &count)
+                host_info(machHostPort, HOST_BASIC_INFO, $0, &count)
             }
         }
         
@@ -36,11 +36,11 @@ internal class UsageReader: Reader<RAM_Usage> {
     
     public override func read() {
         var stats = vm_statistics64()
-        var count = UInt32(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        var count = UInt32(MemoryLayout<vm_statistics64_data_t>.offset(of: \.swapped_count)! / MemoryLayout<integer_t>.size)
         
         let result: kern_return_t = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(machHostPort, HOST_VM_INFO64, $0, &count)
             }
         }
         
@@ -69,6 +69,14 @@ internal class UsageReader: Reader<RAM_Usage> {
             default: pressureValue = .normal
             }
             
+            var memoryLevel: Int32 = 0
+            var memoryLevelSize = MemoryLayout<Int32>.size
+            var pressurePercentage: Int? = nil
+            if sysctlbyname("kern.memorystatus_level", &memoryLevel, &memoryLevelSize, nil, 0) == 0,
+               memoryLevelSize == MemoryLayout<Int32>.size, (0...100).contains(memoryLevel) {
+                pressurePercentage = 100 - Int(memoryLevel)
+            }
+            
             var stringSize: size_t = MemoryLayout<xsw_usage>.size
             var swap: xsw_usage = xsw_usage()
             sysctlbyname("vm.swapusage", &swap, &stringSize, nil, 0)
@@ -91,7 +99,7 @@ internal class UsageReader: Reader<RAM_Usage> {
                     used: Double(swap.xsu_used),
                     free: Double(swap.xsu_avail)
                 ),
-                pressure: Pressure(level: pressureLevel, value: pressureValue),
+                pressure: Pressure(level: pressureLevel, value: pressureValue, percentage: pressurePercentage),
                 
                 swapins: swapins,
                 swapouts: swapouts
@@ -116,6 +124,7 @@ public class ProcessReader: Reader<[TopProcess]> {
     
     public override func setup() {
         self.popup = true
+        self.preview = true
         self.setInterval(Store.shared.int(key: "\(self.title)_updateTopInterval", defaultValue: 1))
     }
     
@@ -152,9 +161,10 @@ public class ProcessReader: Reader<[TopProcess]> {
         
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
         let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: outputData, encoding: .utf8)
+        // swiftlint:disable:next optional_data_string_conversion
+        let output = String(decoding: outputData, as: UTF8.self)
         _ = String(data: errorData, encoding: .utf8)
-        guard let output, !output.isEmpty else { return }
+        guard !output.isEmpty else { return }
         
         var processes: [TopProcess] = []
         output.enumerateLines { (line, _) in

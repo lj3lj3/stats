@@ -13,7 +13,21 @@ import Cocoa
 import Kit
 
 internal class Preview: PreviewWrapper {
+    private var latestProcesses: [TopProcess]?
+    private var latestLoad: GPU_Info?
+    private let utilizationHistory = LineChartData(capacity: 600)
+    private let aneHistory = LineChartData(capacity: 600)
+    private let memoryHistory = LineChartData(capacity: 600)
+    private let fpsHistory = LineChartData(capacity: 600)
+    
     private var initialized: Bool = false
+    private var initializedProcesses: Bool = false
+    private var processes: ProcessesView? = nil
+    private var processesSection: PreferencesSection? = nil
+    
+    private var numberOfProcesses: Int {
+        Store.shared.int(key: "\(self.module.stringValue)_processes", defaultValue: 8)
+    }
     
     private var fpsField: NSTextField? = nil
     
@@ -31,8 +45,7 @@ internal class Preview: PreviewWrapper {
     
     private var utilizationLineChart: LineChartView? = nil
     private var aneLineChart: LineChartView? = nil
-    private var renderLineChart: LineChartView? = nil
-    private var tilerLineChart: LineChartView? = nil
+    private var memoryLineChart: LineChartView? = nil
     private var fpsLineChart: LineChartView? = nil
     
     private var selectedGPU: String {
@@ -41,22 +54,25 @@ internal class Preview: PreviewWrapper {
     
     public init(_ module: ModuleType) {
         super.init(type: module)
-        
+    }
+    
+    public override func loadContent() {
         self.addArrangedSubview(PreferencesSection([self.quickView()]))
         
-        let (historyView, historyChart) = self.historyView()
+        let (historyView, historyChart) = self.historyView(self.utilizationHistory)
         self.utilizationLineChart = historyChart
         
-        let (aneHistoryView, aneHistoryChart) = self.historyView()
+        let (aneHistoryView, aneHistoryChart) = self.historyView(self.aneHistory)
         self.aneLineChart = aneHistoryChart
         
-        let (renderHistoryView, renderHistoryChart) = self.historyView()
-        self.renderLineChart = renderHistoryChart
+        let (memoryHistoryView, memoryHistoryChart) = self.historyView(self.memoryHistory)
+        memoryHistoryChart.setLegend(x: true, y: false)
+        memoryHistoryChart.setToolTipFunc { v in
+            return Units(bytes: Int64(v.value)).getReadableMemory(style: .memory)
+        }
+        self.memoryLineChart = memoryHistoryChart
         
-        let (tilerHistoryView, tilerHistoryChart) = self.historyView()
-        self.tilerLineChart = tilerHistoryChart
-        
-        let (fpsHistoryView, fpsHistoryChart) = self.historyView()
+        let (fpsHistoryView, fpsHistoryChart) = self.historyView(self.fpsHistory)
         fpsHistoryChart.setSuffix(" fps")
         self.fpsLineChart = fpsHistoryChart
         
@@ -69,12 +85,40 @@ internal class Preview: PreviewWrapper {
         let secondSplitView = NSStackView()
         secondSplitView.orientation = .horizontal
         secondSplitView.distribution = .fillEqually
-        secondSplitView.addArrangedSubview(PreferencesSection(title: localizedString("Render utilization history"), [renderHistoryView]))
-        secondSplitView.addArrangedSubview(PreferencesSection(title: localizedString("Tiler utilization history"), [tilerHistoryView]))
+        secondSplitView.addArrangedSubview(PreferencesSection(title: localizedString("Memory usage history"), [memoryHistoryView]))
+        secondSplitView.addArrangedSubview(PreferencesSection(title: localizedString("FPS history"), [fpsHistoryView]))
         
         self.addArrangedSubview(firstSplitView)
         self.addArrangedSubview(secondSplitView)
-        self.addArrangedSubview(PreferencesSection(title: localizedString("FPS history"), [fpsHistoryView]))
+        #if arch(arm64)
+        self.addArrangedSubview(self.topProcesses())
+        #endif
+        
+        if let value = self.latestLoad { self.renderLoad(value) }
+        if let list = self.latestProcesses { self.renderProcesses(list) }
+    }
+    
+    public override func unloadContent() {
+        self.processes?.setLock(false)
+        self.arrangedSubviews.forEach { self.removeArrangedSubview($0) }
+        self.subviews.forEach { $0.removeFromSuperview() }
+        self.processes = nil
+        self.processesSection = nil
+        self.fpsField = nil
+        self.utilizationBar = nil
+        self.utilizationField = nil
+        self.renderBar = nil
+        self.renderField = nil
+        self.tilerBar = nil
+        self.tilerField = nil
+        self.aneBar = nil
+        self.aneField = nil
+        self.utilizationLineChart = nil
+        self.aneLineChart = nil
+        self.memoryLineChart = nil
+        self.fpsLineChart = nil
+        self.initialized = false
+        self.initializedProcesses = false
     }
     
     required init?(coder: NSCoder) {
@@ -135,7 +179,7 @@ internal class Preview: PreviewWrapper {
                     let utilization = self.barView(title: localizedString("GPU utilization"))
                     self.utilizationBar = utilization.1
                     self.utilizationField = utilization.2
-                    let render = self.barView(title: localizedString("Render utilization"))
+                    let render = self.barView(title: localizedString("Renderer utilization"))
                     self.renderBar = render.1
                     self.renderField = render.2
                     
@@ -181,14 +225,14 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
-    private func historyView() -> (NSView, LineChartView) {
+    private func historyView(_ history: LineChartData) -> (NSView, LineChartView) {
         let view: NSStackView = NSStackView()
         view.orientation = .vertical
         view.distribution = .fillEqually
         view.spacing = Constants.Settings.margin*2
         view.heightAnchor.constraint(equalToConstant: 140).isActive = true
         
-        let chart = LineChartView(num: 600)
+        let chart = LineChartView(history: history)
         chart.setLegend(x: true, y: true)
         view.addArrangedSubview(chart)
         
@@ -223,45 +267,100 @@ internal class Preview: PreviewWrapper {
         return (view, bar, valueField)
     }
     
-    internal func loadCallback(_ value: GPU_Info) {
+    private func topProcesses() -> NSView {
+        let view = ProcessesView(
+            values: [(localizedString("Usage"), nil)],
+            n: self.numberOfProcesses,
+            showPID: true,
+            showChart: true
+        )
+        self.processes = view
+        
+        let section = PreferencesSection(title: localizedString("Top processes"), [view])
+        section.isHidden = self.numberOfProcesses == 0
+        self.processesSection = section
+        
+        return section
+    }
+    
+    public func numberOfProcessesUpdated() {
+        self.processes?.setLock(false)
+        self.processes?.setNumberOfProcesses(self.numberOfProcesses)
+        self.processesSection?.isHidden = self.numberOfProcesses == 0
+        self.initializedProcesses = false
+    }
+    
+    public func processCallback(_ list: [TopProcess]?) {
+        guard let list else { return }
+        
         DispatchQueue.main.async(execute: {
-            if (self.window?.isVisible ?? false) || !self.initialized {
-                if let value = value.utilization {
-                    self.utilizationField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
-                    self.utilizationBar?.setValue(ColorValue(value))
-                }
-                if let value = value.renderUtilization {
-                    self.renderField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
-                    self.renderBar?.setValue(ColorValue(value))
-                }
-                if let value = value.tilerUtilization {
-                    self.tilerField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
-                    self.tilerBar?.setValue(ColorValue(value))
-                }
-                if let value = value.aneUtilization {
-                    self.aneField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
-                    self.aneBar?.setValue(ColorValue(value))
-                }
-                if let value = value.fps {
-                    self.fpsField?.stringValue = "\(Int(value)) FPS"
-                }
-                self.initialized = true
+            self.latestProcesses = list
+            guard self.contentLoaded else { return }
+            self.renderProcesses(list)
+        })
+    }
+    
+    private func renderProcesses(_ list: [TopProcess]) {
+        guard (self.window?.isVisible ?? false) || !self.initializedProcesses, let view = self.processes else { return }
+        
+        for i in 0..<view.count {
+            if list.indices.contains(i) {
+                let process = list[i]
+                view.set(i, process, [String(format: "%.1f%%", process.usage)], usage: ColorValue(min(process.usage / 100, 1), color: .systemBlue))
+            } else {
+                view.set(i, nil, [])
             }
+        }
+        self.initializedProcesses = true
+    }
+    
+    internal func loadCallback(_ value: GPU_Info) {
+        let date = Date()
+        DispatchQueue.main.async(execute: {
+            self.latestLoad = value
             if let value = value.utilization {
-                self.utilizationLineChart?.addValue(value)
+                self.utilizationHistory.append(DoubleValue(value, at: date))
+                self.utilizationLineChart?.historyUpdated()
             }
             if let value = value.aneUtilization {
-                self.aneLineChart?.addValue(value)
+                self.aneHistory.append(DoubleValue(value, at: date))
+                self.aneLineChart?.historyUpdated()
             }
-            if let value = value.renderUtilization {
-                self.renderLineChart?.addValue(value)
-            }
-            if let value = value.tilerUtilization {
-                self.tilerLineChart?.addValue(value)
+            if let value = value.memory {
+                self.memoryHistory.append(DoubleValue(value, at: date))
+                self.memoryLineChart?.historyUpdated()
             }
             if let value = value.fps {
-                self.fpsLineChart?.addValue(value/100)
+                self.fpsHistory.append(DoubleValue(value/100, at: date))
+                self.fpsLineChart?.historyUpdated()
             }
+            guard self.contentLoaded else { return }
+            self.renderLoad(value)
         })
+    }
+    
+    private func renderLoad(_ value: GPU_Info) {
+        if (self.window?.isVisible ?? false) || !self.initialized {
+            if let value = value.utilization {
+                self.utilizationField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
+                self.utilizationBar?.setValue(ColorValue(value))
+            }
+            if let value = value.renderUtilization {
+                self.renderField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
+                self.renderBar?.setValue(ColorValue(value))
+            }
+            if let value = value.tilerUtilization {
+                self.tilerField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
+                self.tilerBar?.setValue(ColorValue(value))
+            }
+            if let value = value.aneUtilization {
+                self.aneField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
+                self.aneBar?.setValue(ColorValue(value))
+            }
+            if let value = value.fps {
+                self.fpsField?.stringValue = "\(Int(value)) FPS"
+            }
+            self.initialized = true
+        }
     }
 }

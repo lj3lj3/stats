@@ -28,6 +28,23 @@ public enum SensorType: String, Codable {
     case power = "Power"
     case energy = "Energy"
     case fan = "Fans"
+    
+    var remoteCode: String {
+        switch self {
+        case .temperature:
+            return "t"
+        case .voltage:
+            return "v"
+        case .current:
+            return "c"
+        case .power:
+            return "p"
+        case .energy:
+            return "e"
+        case .fan:
+            return "f"
+        }
+    }
 }
 
 public protocol Sensor_p {
@@ -51,7 +68,7 @@ public protocol Sensor_p {
     var formattedPopupValue: String { get }
 }
 
-public class Sensors_List: Codable {
+public class Sensors_List: Codable, RemoteType {
     private var queue: DispatchQueue = DispatchQueue(label: "eu.exelban.Stats.Sensors.SynchronizedArray", attributes: .concurrent)
     
     private var list: [Sensor_p] = []
@@ -88,6 +105,26 @@ public class Sensors_List: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let wrappers = try container.decode([Sensor_w].self, forKey: .sensors)
         self.sensors = wrappers.map { $0.sensor }
+    }
+    
+    public func remote() -> String? {
+        let sensors = self.sensors.filter({ $0.group != .unknown && $0.value.isFinite })
+        var string = "\(sensors.count)"
+        for sensor in sensors {
+            let key = self.escapeRemoteField(sensor.key)
+            let name = self.escapeRemoteField(sensor.name)
+            let type = sensor.type.remoteCode
+            string += ",\(key),\(name),\(type),\(sensor.value)"
+        }
+        string += "$"
+        return string
+    }
+    
+    private func escapeRemoteField(_ value: String) -> String {
+        guard value.utf8.contains(where: { $0 == 0x25 || $0 == 0x2C || $0 == 0x24 }) else { return value }
+        return value.replacingOccurrences(of: "%", with: "%25")
+            .replacingOccurrences(of: ",", with: "%2C")
+            .replacingOccurrences(of: "$", with: "%24")
     }
 }
 
@@ -345,6 +382,11 @@ internal let SensorsList: [Sensor] = [
     Sensor(key: "TC0P", name: "CPU proximity", group: .CPU, type: .temperature, platforms: Platform.all),
     Sensor(key: "TCAD", name: "CPU package", group: .CPU, type: .temperature, platforms: Platform.all),
     
+    Sensor(key: "TCAC", name: "CPU A core die", group: .CPU, type: .temperature, platforms: [.intel], average: true),
+    Sensor(key: "TCBC", name: "CPU B core die", group: .CPU, type: .temperature, platforms: [.intel], average: true),
+    Sensor(key: "TCAH", name: "CPU A heatsink", group: .CPU, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TCBH", name: "CPU B heatsink", group: .CPU, type: .temperature, platforms: [.intel]),
+    
     Sensor(key: "TC%c", name: "CPU core %", group: .CPU, type: .temperature, platforms: Platform.all, average: true),
     Sensor(key: "TC%C", name: "CPU Core %", group: .CPU, type: .temperature, platforms: Platform.all, average: true),
     
@@ -370,6 +412,15 @@ internal let SensorsList: [Sensor] = [
     Sensor(key: "TN0D", name: "Northbridge diode", group: .system, type: .temperature, platforms: Platform.all),
     Sensor(key: "TN0H", name: "Northbridge heatsink", group: .system, type: .temperature, platforms: Platform.all),
     Sensor(key: "TN0P", name: "Northbridge proximity", group: .system, type: .temperature, platforms: Platform.all),
+    
+    Sensor(key: "TMA1", name: "Memory riser A slot 1", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMA2", name: "Memory riser A slot 2", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMA3", name: "Memory riser A slot 3", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMA4", name: "Memory riser A slot 4", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMB1", name: "Memory riser B slot 1", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMB2", name: "Memory riser B slot 2", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMB3", name: "Memory riser B slot 3", group: .system, type: .temperature, platforms: [.intel]),
+    Sensor(key: "TMB4", name: "Memory riser B slot 4", group: .system, type: .temperature, platforms: [.intel]),
     
     // Apple Silicon
     Sensor(key: "Tp09", name: "CPU efficiency core 1", group: .CPU, type: .temperature, platforms: Platform.m1Gen, average: true),
@@ -456,8 +507,8 @@ internal let SensorsList: [Sensor] = [
     
     Sensor(key: "Tg0G", name: "GPU 1", group: .GPU, type: .temperature, platforms: [.m4], average: true),
     Sensor(key: "Tg0H", name: "GPU 2", group: .GPU, type: .temperature, platforms: [.m4], average: true),
-    Sensor(key: "Tg1U", name: "GPU 1", group: .GPU, type: .temperature, platforms: [.m4Pro, .m4Max, .m4Ultra], average: true),
-    Sensor(key: "Tg1k", name: "GPU 2", group: .GPU, type: .temperature, platforms: [.m4Pro, .m4Max, .m4Ultra], average: true),
+    Sensor(key: "Tg1U", name: "GPU 1", group: .GPU, type: .temperature, platforms: [.m4Pro, .m4Max], average: true),
+    Sensor(key: "Tg1k", name: "GPU 2", group: .GPU, type: .temperature, platforms: [.m4Pro, .m4Max], average: true),
     
     Sensor(key: "Tg0K", name: "GPU 3", group: .GPU, type: .temperature, platforms: Platform.m4Gen, average: true),
     Sensor(key: "Tg0L", name: "GPU 4", group: .GPU, type: .temperature, platforms: Platform.m4Gen, average: true),
@@ -500,6 +551,54 @@ internal let SensorsList: [Sensor] = [
     Sensor(key: "Tg1c", name: "GPU 7", group: .GPU, type: .temperature, platforms: Platform.m5Gen, average: true),
     Sensor(key: "Tg1g", name: "GPU 8", group: .GPU, type: .temperature, platforms: Platform.m5Gen, average: true),
     
+    // M6
+    
+    Sensor(key: "Tp0j", name: "CPU super core 1", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0g", name: "CPU super core 2", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp09", name: "CPU super core 3", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp07", name: "CPU super core 4", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    
+    Sensor(key: "Tp0m", name: "CPU performance core 1", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0L", name: "CPU performance core 2", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0I", name: "CPU performance core 3", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0d", name: "CPU performance core 4", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0E", name: "CPU performance core 5", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0G", name: "CPU performance core 6", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp0b", name: "CPU performance core 7", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tp05", name: "CPU performance core 8", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    
+    Sensor(key: "Te07", name: "CPU efficiency core 1", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Te08", name: "CPU efficiency core 2", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Te09", name: "CPU efficiency core 3", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Te0c", name: "CPU efficiency core 4", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Te0h", name: "CPU efficiency core 5", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Te0i", name: "CPU efficiency core 6", group: .CPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    
+    Sensor(key: "Tg1e", name: "GPU 1", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg0d", name: "GPU 2", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg0c", name: "GPU 3", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg0b", name: "GPU 4", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg1c", name: "GPU 5", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg1d", name: "GPU 6", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg07", name: "GPU 7", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg1f", name: "GPU 8", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg09", name: "GPU 9", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg0a", name: "GPU 10", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg1g", name: "GPU 11", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    Sensor(key: "Tg1h", name: "GPU 12", group: .GPU, type: .temperature, platforms: Platform.m6Gen, average: true),
+    
+    // A18 Pro
+    Sensor(key: "Te05", name: "CPU efficiency core 1", group: .CPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    Sensor(key: "Te0S", name: "CPU efficiency core 2", group: .CPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    
+    Sensor(key: "Tp05", name: "CPU performance core 1", group: .CPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    Sensor(key: "Tp0D", name: "CPU performance core 2", group: .CPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    
+    Sensor(key: "Tg05", name: "GPU 1", group: .GPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    Sensor(key: "Tg0D", name: "GPU 2", group: .GPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    Sensor(key: "Tg0L", name: "GPU 3", group: .GPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    Sensor(key: "Tg0e", name: "GPU 4", group: .GPU, type: .temperature, platforms: [Platform.a18Pro], average: true),
+    
     // Apple Silicon
     Sensor(key: "TaLP", name: "Airflow left", group: .sensor, type: .temperature, platforms: Platform.apple),
     Sensor(key: "TaRF", name: "Airflow right", group: .sensor, type: .temperature, platforms: Platform.apple),
@@ -540,6 +639,10 @@ internal let SensorsList: [Sensor] = [
     
     // Power
     Sensor(key: "PC0C", name: "CPU Core", group: .CPU, type: .power, platforms: Platform.all),
+    Sensor(key: "PCAB", name: "CPU A core power (PCAB)", group: .CPU, type: .power, platforms: [.intel]),
+    Sensor(key: "PCAC", name: "CPU A core power (PCAC)", group: .CPU, type: .power, platforms: [.intel]),
+    Sensor(key: "PCBB", name: "CPU B core power (PCBB)", group: .CPU, type: .power, platforms: [.intel]),
+    Sensor(key: "PCBC", name: "CPU B core power (PCBC)", group: .CPU, type: .power, platforms: [.intel]),
     Sensor(key: "PCAM", name: "CPU Core (IMON)", group: .CPU, type: .power, platforms: Platform.all),
     Sensor(key: "PCPC", name: "CPU Package", group: .CPU, type: .power, platforms: Platform.all),
     Sensor(key: "PCTR", name: "CPU Total", group: .CPU, type: .power, platforms: Platform.all),
@@ -561,12 +664,14 @@ internal let SensorsList: [Sensor] = [
     Sensor(key: "PDTR", name: "DC In", group: .sensor, type: .power, platforms: Platform.all),
     Sensor(key: "PMTR", name: "Memory Total", group: .sensor, type: .power, platforms: Platform.all),
     Sensor(key: "PSTR", name: "System Total", group: .sensor, type: .power, platforms: Platform.all),
+    Sensor(key: "PN0C", name: "Northbridge", group: .system, type: .power, platforms: [.intel]),
     
     Sensor(key: "PU1R", name: "Thunderbolt Left", group: .sensor, type: .power, platforms: Platform.all),
     Sensor(key: "PU2R", name: "Thunderbolt Right", group: .sensor, type: .power, platforms: Platform.all),
     
-    Sensor(key: "PDBR", name: "Power Delivery Brightness", group: .sensor, type: .power, platforms: [.m1, .m1Pro, .m1Max, .m1Ultra, .m4, .m4Pro, .m4Max, .m4Ultra]),
-    Sensor(key: "PBwo", name: "Display Backlight", group: .sensor, type: .power, platforms: Platform.m5Gen)
+    Sensor(key: "PDBR", name: "Power Delivery Brightness", group: .sensor, type: .power, platforms: Platform.m1Gen + Platform.m4Gen),
+    Sensor(key: "PBwo", name: "Display Backlight", group: .sensor, type: .power, platforms: Platform.m5Gen + [Platform.a18Pro]),
+    Sensor(key: "PBLR", name: "Display Backlight", group: .sensor, type: .power, platforms: Platform.m6Gen)
 ]
 
 internal let HIDSensorsList: [Sensor] = [

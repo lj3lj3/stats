@@ -40,6 +40,25 @@ internal class SensorsReader: Reader<Sensors_List> {
         dict?.release()
         
         self.list.sensors = self.sensors()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(self.resetHIDSensors), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+    
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        AppleSiliconSensorsReset()
+    }
+    
+    public override func stop() {
+        super.stop()
+        self.resetHIDSensors()
+    }
+    
+    public override func terminate() {
+        self.resetHIDSensors()
+    }
+    
+    @objc private func resetHIDSensors() {
+        AppleSiliconSensorsReset()
     }
     
     private func sensors() -> [Sensor_p] {
@@ -500,6 +519,7 @@ extension SensorsReader {
                 current + hidSensors.filter({ (s: Sensor_p) in !current.contains(where: { $0.key == s.key }) })
             }
         } else {
+            self.resetHIDSensors()
             self.list.update { current in
                 current.filter({ $0.group != .hid })
             }
@@ -593,11 +613,6 @@ extension SensorsReader {
             self.lastIOSensorsRead = now
             return (0, 0, 0, 0, 0)
         }
-        guard prevCPU != 0 else {
-            self.lastIOSensorsRead = now
-            return (0, 0, 0, 0, 0)
-        } // omit first read
-        
         let elapsed = now.timeIntervalSince(lastIOSensorsRead)
         defer { self.lastIOSensorsRead = now }
         return (

@@ -48,6 +48,7 @@ open class PortalWrapper: NSStackView, Portal_p {
         super.init(frame: .zero)
         
         self.orientation = .vertical
+        self.alignment = .width
         self.spacing = Constants.Popup.spacing
         
         self.addArrangedSubview(self.header)
@@ -60,6 +61,8 @@ open class PortalWrapper: NSStackView, Portal_p {
         }
         
         self.heightAnchor.constraint(equalToConstant: self.height).isActive = true
+        self.header.widthAnchor.constraint(equalTo: self.widthAnchor).isActive = true
+        self.body.widthAnchor.constraint(equalTo: self.widthAnchor).isActive = true
         self.body.bottomAnchor.constraint(equalTo: self.bottomAnchor).isActive = true
     }
     

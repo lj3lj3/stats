@@ -43,6 +43,7 @@ public protocol Popup_p: NSView {
 
 open class PopupWrapper: NSStackView, Popup_p {
     public var title: String
+    public var contentLoaded: Bool = false
     public var keyboardShortcut: [UInt16] = []
     open var sizeCallback: ((NSSize) -> Void)? = nil
     
@@ -57,6 +58,28 @@ open class PopupWrapper: NSStackView, Popup_p {
         fatalError("init(coder:) has not been implemented")
     }
     
+    // build popup content before measuring the window
+    public final func prepareForDisplay() {
+        guard !self.contentLoaded else { return }
+        self.contentLoaded = true
+        self.loadContent()
+        self.layoutSubtreeIfNeeded()
+        self.appear()
+        self.sizeCallback?(self.frame.size)
+    }
+    
+    // release popup controls while keeping cached readings
+    public final func releaseContent() {
+        guard self.contentLoaded else { return }
+        self.contentLoaded = false
+        self.arrangedSubviews.forEach { self.removeArrangedSubview($0) }
+        self.subviews.forEach { $0.removeFromSuperview() }
+        self.unloadContent()
+    }
+    
+    open func loadContent() {}
+    open func unloadContent() {}
+    
     open func settings() -> NSView? { return nil }
     open func appear() {}
     open func disappear() {}
@@ -68,6 +91,10 @@ open class PopupWrapper: NSStackView, Popup_p {
     
     public func apply<T>(_ value: T, to cache: PopupCache<T>, render: @escaping (T) -> Void) {
         DispatchQueue.main.async {
+            if !self.contentLoaded {
+                cache.value = value
+                return
+            }
             cache.apply(value, visible: self.window?.isVisible ?? false, render: render)
         }
     }
@@ -77,7 +104,7 @@ open class PopupWrapper: NSStackView, Popup_p {
     }
 }
 
-public class PopupWindow: NSWindow, NSWindowDelegate {
+public class PopupWindow: NSPanel, NSWindowDelegate {
     private let viewController: PopupViewController
     internal var locked: Bool = false
     internal var openedBy: widget_t? = nil
@@ -93,7 +120,7 @@ public class PopupWindow: NSWindow, NSWindowDelegate {
                 width: self.viewController.view.frame.width,
                 height: self.viewController.view.frame.height
             ),
-            styleMask: [.titled, .fullSizeContentView],
+            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
@@ -107,7 +134,8 @@ public class PopupWindow: NSWindow, NSWindowDelegate {
         self.titleVisibility = .hidden
         self.contentViewController = self.viewController
         self.titlebarAppearsTransparent = true
-        self.animationBehavior = .default
+        self.animationBehavior = .none
+        self.hidesOnDeactivate = false
         self.collectionBehavior = .moveToActiveSpace
         self.backgroundColor = .clear
         self.hasShadow = true
@@ -305,6 +333,7 @@ internal class PopupView: NSView {
     internal func disappear() {
         self.header.setCloseButton(false)
         self.view?.disappear()
+        (self.view as? PopupWrapper)?.releaseContent()
     }
     
     private func recalculateHeight(_ size: NSSize) {
@@ -478,6 +507,7 @@ internal class HeaderView: NSStackView {
     
     @objc func openSystemStats() {
         guard let url = URL(string: "https://app.system-stats.com") else { return }
+        self.closePopup()
         NSWorkspace.shared.open(url)
     }
     

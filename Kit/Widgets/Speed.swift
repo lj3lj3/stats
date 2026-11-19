@@ -29,8 +29,16 @@ public class SpeedWidget: WidgetWrapper {
     private var symbols: (input: String, output: String) = ("I", "O")
     private var words: (input: String, output: String) = ("Input", "Output")
     
-    private var inputValue: Int64 = 0
-    private var outputValue: Int64 = 0
+    private var _inputValue: Int64 = 0
+    private var _outputValue: Int64 = 0
+    private var inputValue: Int64 {
+        get { self.queue.sync { self._inputValue } }
+        set { self.queue.sync { self._inputValue = newValue } }
+    }
+    private var outputValue: Int64 {
+        get { self.queue.sync { self._outputValue } }
+        set { self.queue.sync { self._outputValue = newValue } }
+    }
     
     private var width: CGFloat = 58
     
@@ -233,7 +241,7 @@ public class SpeedWidget: WidgetWrapper {
     }
     
     private func drawValue(_ value: Int64, offset: CGPoint, color: NSColor) -> CGFloat {
-        let rowWidth: CGFloat = self.unitsState ? 58 : 32
+        var rowWidth: CGFloat = self.unitsState ? 58 : 32
         let height: CGFloat = self.frame.height
         let style = NSMutableParagraphStyle()
         style.alignment = self.valueAlignment
@@ -245,11 +253,14 @@ public class SpeedWidget: WidgetWrapper {
             NSAttributedString.Key.paragraphStyle: style
         ]
         
-        let rect = CGRect(x: offset.x, y: (height-size)/2 + offset.y + 1, width: rowWidth - (Constants.Widget.margin.x*2), height: size)
         let value = NSAttributedString.init(
             string: Units(bytes: value).getReadableSpeed(base: base, unit: self.speedUnit, omitUnits: !self.unitsState),
             attributes: inputStringAttributes
         )
+        if self.speedUnit != NetworkSpeedUnitAuto {
+            rowWidth = max(rowWidth, value.size().width.rounded(.up) + (Constants.Widget.margin.x*2))
+        }
+        let rect = CGRect(x: offset.x, y: (height-size)/2 + offset.y + 1, width: rowWidth - (Constants.Widget.margin.x*2), height: size)
         value.draw(with: rect)
         
         return rowWidth
@@ -337,7 +348,7 @@ public class SpeedWidget: WidgetWrapper {
         }
         
         if self.valueState {
-            let rowWidth: CGFloat = self.unitsState ? 48 : 30
+            var rowWidth: CGFloat = self.unitsState ? 48 : 30
             let rowHeight: CGFloat = self.frame.height / 2
             let style = NSMutableParagraphStyle()
             style.alignment = self.valueAlignment
@@ -356,18 +367,22 @@ public class SpeedWidget: WidgetWrapper {
             let inputY: CGFloat = self.displayValueState == "io" ? rowHeight + 1 : 1
             let outputY: CGFloat = self.displayValueState == "io" ? 1 : rowHeight + 1
             
-            var rect = CGRect(x: Constants.Widget.margin.x + x, y: inputY, width: rowWidth - (Constants.Widget.margin.x*2), height: rowHeight)
             let input = NSAttributedString.init(
                 string: Units(bytes: self.inputValue).getReadableSpeed(base: base, unit: self.speedUnit, omitUnits: !self.unitsState),
                 attributes: inputStringAttributes
             )
-            input.draw(with: rect)
-            
-            rect = CGRect(x: Constants.Widget.margin.x + x, y: outputY, width: rowWidth - (Constants.Widget.margin.x*2), height: rowHeight)
             let output = NSAttributedString.init(
                 string: Units(bytes: self.outputValue).getReadableSpeed(base: base, unit: self.speedUnit, omitUnits: !self.unitsState),
                 attributes: outputStringAttributes
             )
+            if self.speedUnit != NetworkSpeedUnitAuto {
+                rowWidth = max(rowWidth, max(input.size().width, output.size().width).rounded(.up) + (Constants.Widget.margin.x*2))
+            }
+            
+            var rect = CGRect(x: Constants.Widget.margin.x + x, y: inputY, width: rowWidth - (Constants.Widget.margin.x*2), height: rowHeight)
+            input.draw(with: rect)
+            
+            rect = CGRect(x: Constants.Widget.margin.x + x, y: outputY, width: rowWidth - (Constants.Widget.margin.x*2), height: rowHeight)
             output.draw(with: rect)
             
             width += rowWidth
@@ -654,20 +669,24 @@ public class SpeedWidget: WidgetWrapper {
     }
     
     public func setValue(input: Int64, output: Int64) {
-        var updated: Bool = false
-        
-        if self.inputValue != input {
-            self.inputValue = abs(input)
-            updated = true
-        }
-        if self.outputValue != output {
-            self.outputValue = abs(output)
-            updated = true
+        let input = abs(input)
+        let output = abs(output)
+        let updated = self.queue.sync { () -> Bool in
+            var updated = false
+            if self._inputValue != input {
+                self._inputValue = input
+                updated = true
+            }
+            if self._outputValue != output {
+                self._outputValue = output
+                updated = true
+            }
+            return updated
         }
         
         if updated {
             DispatchQueue.main.async(execute: {
-                self.display()
+                self.needsDisplay = true
             })
         }
     }

@@ -19,6 +19,7 @@ internal class Settings: NSStackView, Settings_v {
     private var fansSyncState: Bool = false
     private var unknownSensorsState: Bool = false
     private var fanValueState: FanValue = .percentage
+    private var widgets: [widget_t] = []
     
     public var callback: (() -> Void) = {}
     public var HIDcallback: (() -> Void) = {}
@@ -97,7 +98,15 @@ internal class Settings: NSStackView, Settings_v {
         fatalError("init(coder:) has not been implemented")
     }
     
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        self.load(widgets: self.widgets)
+    }
+    
     public func load(widgets: [widget_t]) {
+        self.widgets = widgets
+        guard self.window != nil else { return }
+        
         var sensors = self.list
         guard !sensors.isEmpty else {
             return
@@ -157,7 +166,7 @@ internal class Settings: NSStackView, Settings_v {
     public func setList(_ list: [Sensor_p]?) {
         guard let list else { return }
         self.list = self.unknownSensorsState ? list : list.filter({ $0.group != .unknown })
-        self.load(widgets: [])
+        self.load(widgets: self.widgets)
     }
     
     @objc private func toggleSensor(_ sender: NSControl) {

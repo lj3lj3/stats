@@ -38,6 +38,14 @@ class ApplicationSettings: NSStackView {
         get { Store.shared.bool(key: "CombinedModules_popup", defaultValue: true) }
         set { Store.shared.set(key: "CombinedModules_popup", value: newValue) }
     }
+    private var combinedModulesAlternateDetails: Bool {
+        get { Store.shared.bool(key: "CombinedModules_alternateDetails", defaultValue: true) }
+        set { Store.shared.set(key: "CombinedModules_alternateDetails", value: newValue) }
+    }
+    private var combinedModulesModifierKeys: [UInt16] {
+        get { Store.shared.array(key: "CombinedModules_modifierKeys", defaultValue: [58]) as? [UInt16] ?? [58] }
+        set { Store.shared.set(key: "CombinedModules_modifierKeys", value: newValue) }
+    }
     
     private var systemWidgetsUpdatesState: Bool {
         get {
@@ -69,10 +77,12 @@ class ApplicationSettings: NSStackView {
     
     private var CPUeButton: NSButton?
     private var CPUpButton: NSButton?
+    private var CPUsButton: NSButton?
     private var GPUButton: NSButton?
     
-    private var CPUeTest: CPUeStressTest = CPUeStressTest()
-    private var CPUpTest: CPUpStressTest = CPUpStressTest()
+    private var CPUeTest: CPUStressTest = CPUStressTest(type: .efficiency)
+    private var CPUpTest: CPUStressTest = CPUStressTest(type: .performance)
+    private var CPUsTest: CPUStressTest = CPUStressTest(type: .super)
     private var GPUTest: GPUStressTest? = GPUStressTest()
     
     private var planField: NSTextField?
@@ -118,7 +128,7 @@ class ApplicationSettings: NSStackView {
                 action: #selector(self.toggleMenuBarPosition),
                 state: self.keepMenuBarPosition
             )),
-            PreferencesRow(localizedString("macOS widgets"), component: switchView(
+            PreferencesRow("macOS widgets", component: switchView(
                 action: #selector(self.toggleSystemWidgetsUpdatesState),
                 state: self.systemWidgetsUpdatesState
             ))
@@ -128,6 +138,11 @@ class ApplicationSettings: NSStackView {
             PreferencesRow(localizedString("Combined modules"), component: switchView(
                 action: #selector(self.toggleCombinedModules),
                 state: self.combinedModulesState
+            )),
+            PreferencesRow(localizedString("Menu bar"), component: selectView(
+                action: #selector(self.toggleCombinedModulesWidget),
+                items: CombinedModulesWidget.all,
+                selected: CombinedModulesWidget.current.rawValue
             )),
             PreferencesRow(component: self.moduleSelector),
             PreferencesRow(localizedString("Spacing"), component: selectView(
@@ -142,13 +157,19 @@ class ApplicationSettings: NSStackView {
             PreferencesRow(localizedString("Combined details"), component: switchView(
                 action: #selector(self.toggleCombinedModulesPopup),
                 state: self.combinedModulesPopup
+            )),
+            PreferencesRow(localizedString("Alternate details on click"), component: switchView(
+                action: #selector(self.toggleCombinedModulesAlternateDetails),
+                state: self.combinedModulesAlternateDetails
+            )),
+            PreferencesRow(localizedString("Keyboard shortcut"), localizedString("Hold Option or Shift, or both."), component: KeyboardShartcutView(
+                callback: self.setCombinedModulesModifierKeys,
+                value: self.combinedModulesModifierKeys,
+                modifierKeys: [58, 60]
             ))
         ])
         scrollView.stackView.addArrangedSubview(self.combinedModulesView!)
-        self.combinedModulesView?.setRowVisibility(1, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(2, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(3, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(4, newState: self.combinedModulesState)
+        self.updateCombinedModulesSettings()
         
         self.remoteControlBtn = switchView(
             action: #selector(self.toggleRemoteControlState),
@@ -159,27 +180,26 @@ class ApplicationSettings: NSStackView {
             state: SystemStats.shared.update
         )
         self.planField = textView(SystemStats.shared.plan?.rawValue.capitalized ?? "Free")
-        self.remoteView = PreferencesSection(title: localizedString("System Stats"), [
-            PreferencesRow(localizedString("Authorization"), component: buttonView(#selector(self.loginToRemote), text: localizedString("Login"))),
+        self.remoteView = PreferencesSection(title: "System Stats", [
+            PreferencesRow(localizedString("Authorization"), component: buttonView(#selector(self.loginToRemote), text: localizedString("Sign in"))),
             PreferencesRow(localizedString("Identificator"), component: textView(SystemStats.shared.id.uuidString)),
             PreferencesRow(localizedString("Plan"), component: self.planField!),
             PreferencesRow(localizedString("Monitoring"), component: switchView(
                 action: #selector(self.toggleRemoteMonitoringState),
                 state: SystemStats.shared.monitoring
             )),
+            PreferencesRow(id: "monitoring_modules", component: buttonView(
+                #selector(self.selectRemoteMonitoringModules), text: localizedString("Modules")
+            )),
             PreferencesRow(localizedString("Control"), component: self.remoteControlBtn!),
             PreferencesRow(localizedString("Update"), component: self.remoteUpdatesBtn!),
-            PreferencesRow(component: buttonView(#selector(self.logoutFromRemote), text: localizedString("Logout"))),
+            PreferencesRow(component: buttonView(#selector(self.logoutFromRemote), text: localizedString("Sign out"))),
             PreferencesRow(component: buttonView(#selector(self.deregisterFromRemote), text: localizedString("Deregister")))
         ])
         scrollView.stackView.addArrangedSubview(self.remoteView!)
-        self.remoteView?.setRowVisibility(1, newState: false)
-        self.remoteView?.setRowVisibility(2, newState: false)
-        self.remoteView?.setRowVisibility(3, newState: false)
-        self.remoteView?.setRowVisibility(4, newState: false)
-        self.remoteView?.setRowVisibility(5, newState: false)
-        self.remoteView?.setRowVisibility(6, newState: false)
-        self.remoteView?.setRowVisibility(7, newState: false)
+        for row in 1...8 {
+            self.remoteView?.setRowVisibility(row, newState: false)
+        }
         
         scrollView.stackView.addArrangedSubview(PreferencesSection(title: localizedString("Settings"), [
             PreferencesRow(
@@ -208,16 +228,25 @@ class ApplicationSettings: NSStackView {
         
         let CPUeButton = buttonView(#selector(self.toggleCPUeStressTest), text: localizedString("Run"))
         let CPUpButton = buttonView(#selector(self.toggleCPUpStressTest), text: localizedString("Run"))
+        let CPUsButton = buttonView(#selector(self.toggleCPUsStressTest), text: localizedString("Run"))
         let GPUButton = buttonView(#selector(self.toggleGPUStressTest), text: localizedString("Run"))
         
         self.CPUeButton = CPUeButton
         self.CPUpButton = CPUpButton
+        self.CPUsButton = CPUsButton
         self.GPUButton = GPUButton
         
-        var tests = [
-            PreferencesRow(localizedString("Efficiency cores"), component: CPUeButton),
-            PreferencesRow(localizedString("Performance cores"), component: CPUpButton)
-        ]
+        let cpu = SystemKit.shared.device.info.cpu
+        var tests: [PreferencesRow] = []
+        if (cpu?.eCores ?? 0) > 0 {
+            tests.append(PreferencesRow(localizedString("Efficiency cores"), component: CPUeButton))
+        }
+        if (cpu?.pCores ?? 1) > 0 {
+            tests.append(PreferencesRow(localizedString("Performance cores"), component: CPUpButton))
+        }
+        if (cpu?.sCores ?? 0) > 0 {
+            tests.append(PreferencesRow(localizedString("Super cores"), component: CPUsButton))
+        }
         if self.GPUTest != nil {
             tests.append(PreferencesRow(localizedString("GPU"), component: GPUButton))
         }
@@ -236,6 +265,7 @@ class ApplicationSettings: NSStackView {
     
     deinit {
         NotificationCenter.default.removeObserver(self, name: .fanHelperState, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .remoteState, object: nil)
     }
     
     internal func viewWillAppear() {
@@ -270,7 +300,7 @@ class ApplicationSettings: NSStackView {
         container.yPlacement = .center
         container.xPlacement = .center
         
-        let iconView: NSImageView = NSImageView(image: NSImage(named: NSImage.Name("AppIcon"))!)
+        let iconView: NSImageView = NSImageView(image: NSImage(named: NSImage.Name("Stats"))!)
         
         let statsName: NSTextField = TextView(frame: NSRect(x: 0, y: 0, width: view.frame.width, height: 22))
         statsName.alignment = .center
@@ -325,7 +355,7 @@ class ApplicationSettings: NSStackView {
             DispatchQueue.main.async(execute: {
                 if self.updateWindow == nil {
                     let w = UpdateWindow()
-                    w.onClose = { [weak self] in self?.updateWindow = nil }
+                    w.onClose = { [weak self = self] in self?.updateWindow = nil }
                     self.updateWindow = w
                 }
                 self.updateWindow?.open(version, settingButton: true)
@@ -347,8 +377,7 @@ class ApplicationSettings: NSStackView {
     @objc private func toggleDock(_ sender: NSButton) {
         let state = sender.state
         Store.shared.set(key: "dockIcon", value: state == NSControl.StateValue.on)
-        let dockIconStatus = state == NSControl.StateValue.on ? NSApplication.ActivationPolicy.regular : NSApplication.ActivationPolicy.accessory
-        NSApp.setActivationPolicy(dockIconStatus)
+        NSApp.updateWindows()
         if state == .off {
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
@@ -363,13 +392,24 @@ class ApplicationSettings: NSStackView {
     
     @objc private func toggleCombinedModules(_ sender: NSButton) {
         self.combinedModulesState = sender.state == NSControl.StateValue.on
-        self.combinedModulesView?.setRowVisibility(1, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(2, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(3, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(4, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(5, newState: self.combinedModulesState)
-        self.combinedModulesView?.setRowVisibility(6, newState: self.combinedModulesState)
+        self.updateCombinedModulesSettings()
         NotificationCenter.default.post(name: .toggleOneView, object: nil, userInfo: nil)
+    }
+    
+    private func updateCombinedModulesSettings() {
+        self.combinedModulesView?.setRowVisibility(1, newState: self.combinedModulesState)
+        self.combinedModulesView?.setRowVisibility(2, newState: self.combinedModulesState && CombinedModulesWidget.current != .icon)
+        for row in 3...6 {
+            self.combinedModulesView?.setRowVisibility(row, newState: self.combinedModulesState && CombinedModulesWidget.current == .widgets)
+        }
+        self.combinedModulesView?.setRowVisibility(7, newState: self.combinedModulesState && CombinedModulesWidget.current == .widgets && self.combinedModulesAlternateDetails)
+    }
+    
+    @objc private func toggleCombinedModulesWidget(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String, let widget = CombinedModulesWidget(rawValue: key) else { return }
+        CombinedModulesWidget.current = widget
+        self.updateCombinedModulesSettings()
+        NotificationCenter.default.post(name: .moduleRearrange, object: nil, userInfo: nil)
     }
     
     @objc private func toggleCombinedModulesSpacing(_ sender: NSMenuItem) {
@@ -386,6 +426,15 @@ class ApplicationSettings: NSStackView {
     @objc private func toggleCombinedModulesPopup(_ sender: NSButton) {
         self.combinedModulesPopup = sender.state == NSControl.StateValue.on
         NotificationCenter.default.post(name: .combinedModulesPopup, object: nil, userInfo: nil)
+    }
+    
+    @objc private func toggleCombinedModulesAlternateDetails(_ sender: NSButton) {
+        self.combinedModulesAlternateDetails = sender.state == NSControl.StateValue.on
+        self.updateCombinedModulesSettings()
+    }
+    
+    private func setCombinedModulesModifierKeys(_ binding: [UInt16]) {
+        self.combinedModulesModifierKeys = binding
     }
     
     @objc private func toggleMenuBarPosition(_ sender: NSButton) {
@@ -461,6 +510,16 @@ class ApplicationSettings: NSStackView {
         }
     }
     
+    @objc private func toggleCPUsStressTest() {
+        if self.CPUsTest.isRunning {
+            self.CPUsTest.stop()
+            self.CPUsButton?.title = localizedString("Run")
+        } else {
+            self.CPUsTest.start()
+            self.CPUsButton?.title = localizedString("Stop")
+        }
+    }
+    
     @objc private func toggleGPUStressTest() {
         guard let test = self.GPUTest else { return }
         
@@ -475,6 +534,34 @@ class ApplicationSettings: NSStackView {
     
     @objc private func toggleRemoteMonitoringState(_ sender: NSButton) {
         SystemStats.shared.monitoring = sender.state == NSControl.StateValue.on
+        self.remoteView?.setRowVisibility("monitoring_modules", newState: SystemStats.shared.monitoring)
+    }
+    @objc private func selectRemoteMonitoringModules(_ sender: NSButton) {
+        let supported = [ModuleType.CPU, .GPU, .RAM, .disk, .sensors, .network, .battery].map { $0.stringValue }
+        let list = modules.filter { $0.available && $0.enabled && supported.contains($0.name) }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        
+        list.forEach { module in
+            let item = NSMenuItem(title: localizedString(module.name), action: #selector(self.toggleRemoteMonitoringModule), keyEquivalent: "")
+            item.target = self
+            item.representedObject = module.name
+            item.state = SystemStats.shared.isMonitoringEnabled(for: module.name) ? .on : .off
+            menu.addItem(item)
+        }
+        if list.isEmpty {
+            let item = NSMenuItem(title: localizedString("None"), action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+    }
+    @objc private func toggleRemoteMonitoringModule(_ sender: NSMenuItem) {
+        guard let module = sender.representedObject as? String else { return }
+        let enabled = sender.state != .on
+        SystemStats.shared.setMonitoring(enabled, for: module)
+        sender.state = enabled ? .on : .off
     }
     @objc private func toggleRemoteControlState(_ sender: NSButton) {
         if sender.state == .on {
@@ -526,25 +613,11 @@ class ApplicationSettings: NSStackView {
     
     private func setRemoteSettings(_ auth: Bool) {
         DispatchQueue.main.async {
-            if auth {
-                self.remoteView?.setRowVisibility(1, newState: true)
-                self.remoteView?.setRowVisibility(2, newState: true)
-                self.remoteView?.setRowVisibility(3, newState: true)
-                self.remoteView?.setRowVisibility(4, newState: true)
-                self.remoteView?.setRowVisibility(5, newState: true)
-                self.remoteView?.setRowVisibility(6, newState: true)
-                self.remoteView?.setRowVisibility(7, newState: true)
-                self.remoteView?.setRowVisibility(0, newState: false)
-            } else {
-                self.remoteView?.setRowVisibility(0, newState: true)
-                self.remoteView?.setRowVisibility(1, newState: false)
-                self.remoteView?.setRowVisibility(2, newState: false)
-                self.remoteView?.setRowVisibility(3, newState: false)
-                self.remoteView?.setRowVisibility(4, newState: false)
-                self.remoteView?.setRowVisibility(5, newState: false)
-                self.remoteView?.setRowVisibility(6, newState: false)
-                self.remoteView?.setRowVisibility(7, newState: false)
+            for row in 1...8 {
+                self.remoteView?.setRowVisibility(row, newState: auth)
             }
+            self.remoteView?.setRowVisibility(0, newState: !auth)
+            self.remoteView?.setRowVisibility("monitoring_modules", newState: auth && SystemStats.shared.monitoring)
         }
     }
     

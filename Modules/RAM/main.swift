@@ -11,7 +11,6 @@
 
 import Cocoa
 import Kit
-import WidgetKit
 
 public struct RAM_Usage: Codable, RemoteType {
     var total: Double
@@ -36,9 +35,12 @@ public struct RAM_Usage: Codable, RemoteType {
         get { Double((self.total - self.free) / self.total) }
     }
     
-    public func remote() -> Data? {
-        let string = "\(self.total),\(self.used),\(self.pressure.level),\(self.swap.used)$"
-        return string.data(using: .utf8)
+    public func remote() -> String? {
+        guard let total = Int64(exactly: self.total),
+              let used = Int64(exactly: self.used),
+              let swap = Int64(exactly: self.swap.used) else { return nil }
+        let string = "\(total),\(used),,\(swap)$"
+        return string
     }
 }
 
@@ -51,6 +53,7 @@ public struct Swap: Codable {
 public struct Pressure: Codable {
     let level: Int
     let value: RAMPressure
+    let percentage: Int?
 }
 
 public class RAM: Module {
@@ -133,11 +136,13 @@ public class RAM: Module {
         self.processReader = ProcessReader(.RAM) { [weak self] value in
             if let list = value {
                 self?.popupView.processCallback(list)
+                self?.previewView.processCallback(list)
             }
         }
         
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
             self?.popupView.numberOfProcessesUpdated()
+            self?.previewView.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async {
                 self?.processReader?.read()
             }
@@ -153,6 +158,7 @@ public class RAM: Module {
         self.portalView.callback(value)
         self.notificationsView.loadCallback(value)
         self.previewView.loadCallback(value)
+        self.summaryCallback(value.usage)
         
         let total: Double = value.total == 0 ? 1 : value.total
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
@@ -225,6 +231,7 @@ public class RAM: Module {
                         switch pair.value {
                         case "level": replacement = "\(value.pressure.level)"
                         case "value": replacement = value.pressure.value.rawValue
+                        case "percentage": replacement = value.pressure.percentage.map { "\($0)%" } ?? "-"
                         default: return
                         }
                     default: return
@@ -242,11 +249,7 @@ public class RAM: Module {
         }
         
         if self.systemWidgetsUpdatesState {
-            if isWidgetActive(self.userDefaults, [RAM_entry.kind, "UnitedWidget"]), let blobData = try? JSONEncoder().encode(value) {
-                self.userDefaults?.set(blobData, forKey: "RAM@UsageReader")
-            }
-            WidgetCenter.shared.reloadTimelines(ofKind: RAM_entry.kind)
-            WidgetCenter.shared.reloadTimelines(ofKind: "UnitedWidget")
+            SystemWidgetUpdates.shared.update(value, key: "RAM@UsageReader", kinds: [RAM_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
         }
     }
 }

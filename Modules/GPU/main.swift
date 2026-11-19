@@ -11,7 +11,6 @@
 
 import Cocoa
 import Kit
-import WidgetKit
 
 public typealias GPU_type = String
 public enum GPU_types: GPU_type {
@@ -27,29 +26,25 @@ public struct GPU_Info: Codable {
     public let type: GPU_type
     
     public let IOClass: String
-    public var vendor: String? = nil
     public let model: String
-    public var cores: Int? = nil
     
     public var state: Bool = true
     
-    public var fanSpeed: Int? = nil
-    public var coreClock: Int? = nil
-    public var memoryClock: Int? = nil
-    public var temperature: Double? = nil
     public var utilization: Double? = nil
     public var renderUtilization: Double? = nil
     public var tilerUtilization: Double? = nil
     public var aneUtilization: Double? = nil
+    
     public var fps: Double? = nil
     
-    init(id: String, type: GPU_type, IOClass: String, vendor: String? = nil, model: String, cores: Int?, utilization: Double? = nil, render: Double? = nil, tiler: Double? = nil) {
+    public var memory: Double? = nil
+    public var memoryLimit: Double? = nil
+    
+    init(id: String, type: GPU_type, IOClass: String, model: String, utilization: Double? = nil, render: Double? = nil, tiler: Double? = nil) {
         self.id = id
         self.type = type
         self.IOClass = IOClass
-        self.vendor = vendor
         self.model = model
-        self.cores = cores
         self.utilization = utilization
         self.renderUtilization = render
         self.tilerUtilization = tiler
@@ -93,16 +88,14 @@ public class GPUs: Codable, RemoteType {
         return self.list.filter{ $0.state && $0.utilization != nil }.sorted{ $0.utilization ?? 0 > $1.utilization ?? 0 }
     }
     
-    public func remote() -> Data? {
-        var string = "\(self.list.count),"
-        for (i, v) in self.list.enumerated() {
-            string += v.remote()
-            if i != self.list.count {
-                string += ","
-            }
+    public func remote() -> String? {
+        let list = self.list
+        var string = "\(list.count)"
+        for v in list {
+            string += ",\(v.remote())"
         }
         string += "$"
-        return string.data(using: .utf8)
+        return string
     }
 }
 
@@ -114,6 +107,7 @@ public class GPU: Module {
     private let previewView: Preview
     
     private var infoReader: InfoReader? = nil
+    private var processReader: ProcessReader? = nil
     
     private var selectedGPU: String = ""
     
@@ -123,6 +117,10 @@ public class GPU: Module {
     
     private var systemWidgetsUpdatesState: Bool {
         self.userDefaults?.bool(forKey: "systemWidgetsUpdates_state") ?? false
+    }
+    
+    private var textValue: String {
+        Store.shared.string(key: "\(self.name)_textWidgetValue", defaultValue: "$usage - $fps")
     }
     
     public init() {
@@ -145,6 +143,12 @@ public class GPU: Module {
         self.infoReader = InfoReader(.GPU) { [weak self] value in
             self?.infoCallback(value)
         }
+        #if arch(arm64)
+        self.processReader = ProcessReader(.GPU) { [weak self] value in
+            self?.popupView.processCallback(value)
+            self?.previewView.processCallback(value)
+        }
+        #endif
         self.selectedGPU = Store.shared.string(key: "\(self.config.name)_gpu", defaultValue: self.selectedGPU)
         
         self.settingsView.selectedGPUHandler = { [weak self] value in
@@ -157,23 +161,40 @@ public class GPU: Module {
         self.settingsView.callback = { [weak self] in
             self?.infoReader?.read()
         }
+        self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
+            guard let self else { return }
+            self.popupView.numberOfProcessesUpdated()
+            self.previewView.numberOfProcessesUpdated()
+            DispatchQueue.global(qos: .background).async { [weak self] in
+                self?.processReader?.read()
+            }
+        }
+        self.settingsView.setTopInterval = { [weak self] value in
+            self?.processReader?.setInterval(value)
+        }
         
-        self.setReaders([self.infoReader])
+        self.setReaders([self.infoReader, self.processReader])
     }
     
     private func infoCallback(_ raw: GPUs?) {
-        guard raw != nil && !raw!.list.isEmpty, let value = raw, self.enabled else { return }
+        guard let value = raw, !value.list.isEmpty, self.enabled else {
+            self.summaryCallback(nil)
+            return
+        }
         
         self.settingsView.setList(value)
         
         let activeGPUs = value.active()
         guard let activeGPU = activeGPUs.first(where: { $0.state }) ?? activeGPUs.first else {
+            self.summaryCallback(nil)
             return
         }
         let selectedGPU: GPU_Info = activeGPUs.first{ $0.model == self.selectedGPU } ?? activeGPU
         guard let utilization = selectedGPU.utilization else {
+            self.summaryCallback(nil)
             return
         }
+        self.summaryCallback(utilization)
         
         self.popupView.loadCallback(selectedGPU)
         self.portalView.callback(selectedGPU)
@@ -191,16 +212,34 @@ public class GPU: Module {
                 widget.setValue([
                     ColorValue(utilization, color: NSColor.systemBlue)
                 ])
+            case let widget as TextWidget:
+                var text = "\(self.textValue)"
+                let pairs = TextWidget.parseText(text)
+                pairs.forEach { pair in
+                    var replacement: String? = nil
+                    
+                    switch pair.key {
+                    case "$usage": replacement = "\(Int(utilization*100))%"
+                    case "$render": replacement = "\(Int((selectedGPU.renderUtilization ?? 0)*100))%"
+                    case "$tiler": replacement = "\(Int((selectedGPU.tilerUtilization ?? 0)*100))%"
+                    case "$ane": replacement = "\(Int((selectedGPU.aneUtilization ?? 0)*100))%"
+                    case "$memory": replacement = Units(bytes: Int64(selectedGPU.memory ?? 0)).getReadableMemory(style: .memory)
+                    case "$fps": replacement = "\(Int((selectedGPU.fps ?? 0).rounded()))"
+                    default: return
+                    }
+                    
+                    if let replacement {
+                        let key = pair.value.isEmpty ? pair.key : "\(pair.key).\(pair.value)"
+                        text = text.replacingOccurrences(of: key, with: replacement)
+                    }
+                }
+                widget.setValue(text)
             default: break
             }
         }
         
         if self.systemWidgetsUpdatesState {
-            if isWidgetActive(self.userDefaults, [GPU_entry.kind, "UnitedWidget"]), let blobData = try? JSONEncoder().encode(selectedGPU) {
-                self.userDefaults?.set(blobData, forKey: "GPU@InfoReader")
-            }
-            WidgetCenter.shared.reloadTimelines(ofKind: GPU_entry.kind)
-            WidgetCenter.shared.reloadTimelines(ofKind: "UnitedWidget")
+            SystemWidgetUpdates.shared.update(selectedGPU, key: "GPU@InfoReader", kinds: [GPU_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
         }
     }
 }

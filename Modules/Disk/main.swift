@@ -11,7 +11,6 @@
 
 import Cocoa
 import Kit
-import WidgetKit
 
 public struct stats: Codable {
     var read: Int64 = 0
@@ -46,8 +45,6 @@ internal func smartCriticalWarnings(_ value: Int) -> [String] {
 }
 
 public struct drive: Codable {
-    var parent: io_object_t = 0
-    
     var uuid: String = ""
     var mediaName: String = ""
     var BSDName: String = ""
@@ -86,7 +83,8 @@ public struct drive: Codable {
     }
     
     public func remote() -> String {
-        return "\(self.uuid),\(self.size),\(self.size-self.free),\(self.free),\(self.activity.read),\(self.activity.write)"
+        let id = self.root ? disk_s.startupVolumeGroupID ?? self.uuid : self.uuid
+        return "\(id),\(self.size),\(self.size-self.free),,\(self.activity.read),\(self.activity.write)"
     }
 }
 
@@ -160,34 +158,18 @@ public class Disks: Codable, RemoteType {
         self.array[idx].free = newValue
     }
     
-    func updateReadWrite(_ idx: Int, read: Int64, write: Int64) {
-        self.array[idx].activity.readBytes = read
-        self.array[idx].activity.writeBytes = write
-    }
-    
-    func updateRead(_ idx: Int, newValue: Int64) {
-        self.array[idx].activity.read = newValue
-    }
-    
-    func updateWrite(_ idx: Int, newValue: Int64) {
-        self.array[idx].activity.write = newValue
-    }
-    
     func updateSMARTData(_ idx: Int, smart: smart_t?) {
         self.array[idx].smart = smart
     }
     
-    public func remote() -> Data? {
+    public func remote() -> String? {
         let arr = self.array.filter({ !$0.removable })
-        var string = "\(arr.count),"
-        for (i, v) in arr.enumerated() {
-            string += v.remote()
-            if i != self.array.count {
-                string += ","
-            }
+        var string = "\(arr.count)"
+        for v in arr {
+            string += ",\(v.remote())"
         }
         string += "$"
-        return string.data(using: .utf8)
+        return string
     }
 }
 
@@ -202,10 +184,7 @@ public struct Disk_process: Process_p, Codable {
     public var pid: Int
     public var name: String
     public var icon: NSImage {
-        if let app = NSRunningApplication(processIdentifier: pid_t(self.pid)) {
-            return app.icon ?? Constants.defaultProcessIcon
-        }
-        return Constants.defaultProcessIcon
+        ProcessIconCache.shared.icon(for: self.pid)
     }
     
     var read: Int
@@ -275,6 +254,7 @@ public class Disk: Module {
         self.processReader = ProcessReader(.disk) { [weak self] value in
             if let list = value {
                 self?.popupView.processCallback(list)
+                self?.previewView.processCallback(list)
             }
         }
         self.smartReader = SMARTReader(.disk) { [weak self] value in
@@ -301,6 +281,7 @@ public class Disk: Module {
         }
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
             self?.popupView.numberOfProcessesUpdated()
+            self?.previewView.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async {
                 self?.processReader?.read()
             }
@@ -319,11 +300,13 @@ public class Disk: Module {
         self.settingsView.setList(value)
         
         guard let d = value.first(where: { $0.mediaName == self.selectedDisk }) ?? value.first(where: { $0.root }) else {
+            self.summaryCallback(nil)
             return
         }
         
         self.portalView.utilizationCallback(d)
         self.notificationsView.utilizationCallback(d.percentage)
+        self.summaryCallback(d.size > 0 ? d.percentage : nil)
         
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
             switch w.item {
@@ -375,11 +358,7 @@ public class Disk: Module {
         }
         
         if self.systemWidgetsUpdatesState {
-            if isWidgetActive(self.userDefaults, [Disk_entry.kind, "UnitedWidget"]), let blobData = try? JSONEncoder().encode(d) {
-                self.userDefaults?.set(blobData, forKey: "Disk@CapacityReader")
-            }
-            WidgetCenter.shared.reloadTimelines(ofKind: Disk_entry.kind)
-            WidgetCenter.shared.reloadTimelines(ofKind: "UnitedWidget")
+            SystemWidgetUpdates.shared.update(d, key: "Disk@CapacityReader", kinds: [Disk_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
         }
     }
     

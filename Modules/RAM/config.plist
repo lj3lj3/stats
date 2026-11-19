@@ -111,6 +111,13 @@
 				<true/>
 			</dict>
 		</dict>
+		<key>icon</key>
+		<dict>
+			<key>Default</key>
+			<false/>
+			<key>Order</key>
+			<integer>9</integer>
+		</dict>
 	</dict>
 	<key>Settings</key>
 	<dict>
@@ -122,6 +129,11 @@
 	<key>Preview</key>
 	<dict>
 		<key>available</key>
+		<true/>
+	</dict>
+	<key>Summary</key>
+	<dict>
+		<key>menu_bar</key>
 		<true/>
 	</dict>
 </dict>

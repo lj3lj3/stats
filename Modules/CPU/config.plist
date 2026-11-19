@@ -80,6 +80,13 @@
 			<key>Order</key>
 			<integer>5</integer>
 		</dict>
+		<key>icon</key>
+		<dict>
+			<key>Default</key>
+			<false/>
+			<key>Order</key>
+			<integer>6</integer>
+		</dict>
 	</dict>
 	<key>Settings</key>
 	<dict>
@@ -91,6 +98,11 @@
 	<key>Preview</key>
 	<dict>
 		<key>available</key>
+		<true/>
+	</dict>
+	<key>Summary</key>
+	<dict>
+		<key>menu_bar</key>
 		<true/>
 	</dict>
 </dict>

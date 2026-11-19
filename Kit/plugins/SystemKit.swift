@@ -32,31 +32,39 @@ public enum Platform: String, Codable {
     case m4
     case m4Pro
     case m4Max
-    case m4Ultra
     
     case m5
     case m5Pro
     case m5Max
     case m5Ultra
     
+    case m6
+    case m6Pro
+    case m6Max
+    
+    case a18Pro
+    
     public static var apple: [Platform] {
         return [
             .m1, .m1Pro, .m1Max, .m1Ultra,
             .m2, .m2Pro, .m2Max, .m2Ultra,
             .m3, .m3Pro, .m3Max, .m3Ultra,
-            .m4, .m4Pro, .m4Max, .m4Ultra,
-            .m5, .m5Pro, .m5Max, .m5Ultra
+            .m4, .m4Pro, .m4Max,
+            .m5, .m5Pro, .m5Max, .m5Ultra,
+            .m6, .m6Pro, .m6Max,
+            .a18Pro
         ]
     }
     
     public var generation: Int {
         switch self {
-        case .intel: return 0
+        case .intel, .a18Pro: return 0
         case .m1, .m1Pro, .m1Max, .m1Ultra: return 1
         case .m2, .m2Pro, .m2Max, .m2Ultra: return 2
         case .m3, .m3Pro, .m3Max, .m3Ultra: return 3
-        case .m4, .m4Pro, .m4Max, .m4Ultra: return 4
+        case .m4, .m4Pro, .m4Max: return 4
         case .m5, .m5Pro, .m5Max, .m5Ultra: return 5
+        case .m6, .m6Pro, .m6Max: return 6
         }
     }
     
@@ -78,10 +86,13 @@ public enum Platform: String, Codable {
         return [.m3, .m3Pro, .m3Max, .m3Ultra]
     }
     public static var m4Gen: [Platform] {
-        return [.m4, .m4Pro, .m4Max, .m4Ultra]
+        return [.m4, .m4Pro, .m4Max]
     }
     public static var m5Gen: [Platform] {
         return [.m5, .m5Pro, .m5Max, .m5Ultra]
+    }
+    public static var m6Gen: [Platform] {
+        return [.m6, .m6Pro, .m6Max]
     }
     
     public static var all: [Platform] {
@@ -167,6 +178,18 @@ public struct gpu_s: Codable {
 }
 
 public struct disk_s: Codable {
+    static let startupDiskInfo: [String: Any]? = {
+        guard let output = process(path: "/usr/sbin/diskutil", arguments: ["info", "-plist", "/"]),
+              let data = output.data(using: .utf8) else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any]
+    }()
+    
+    public static var startupVolumeGroupID: String? {
+        guard let id = self.startupDiskInfo?["APFSVolumeGroupID"] as? String,
+              UUID(uuidString: id) != nil else { return nil }
+        return id
+    }
+    
     public var id: String? = nil
     public var name: String? = nil
     public var size: Int64? = nil
@@ -330,7 +353,7 @@ public class SystemKit {
         }
         
         let result = hostInfo.withMemoryRebound(to: integer_t.self, capacity: Int(size)) {
-            host_info(mach_host_self(), HOST_BASIC_INFO, $0, &size)
+            host_info(machHostPort, HOST_BASIC_INFO, $0, &size)
         }
         
         if result != KERN_SUCCESS {
@@ -374,9 +397,11 @@ public class SystemKit {
         
         while service != 0 {
             service = IOIteratorNext(iterator)
+            guard service != 0 else { break }
             
             var entry: io_iterator_t = io_iterator_t()
             if IORegistryEntryGetChildIterator(service, kIOServicePlane, &entry) != kIOReturnSuccess {
+                IOObjectRelease(service)
                 continue
             }
             var child: io_registry_entry_t = 1
@@ -445,6 +470,12 @@ public class SystemKit {
         }
         IOObjectRelease(iterator)
         
+        if platform?.isNewerThanOrEqual(.m6) == true && !list.isEmpty && !list.contains(where: { $0.type == .unknown }) {
+            eCores = Int32(list.filter{ $0.type == .efficiency }.count)
+            pCores = Int32(list.filter{ $0.type == .performance }.count)
+            sCores = Int32(list.filter{ $0.type == .super }.count)
+        }
+        
         list.sort { $0.id < $1.id }
         for i in list.indices {
             list[i].id = Int32(i)
@@ -491,42 +522,49 @@ public class SystemKit {
     }
     
     private func getFrequencies(for platform: Platform?) -> ([Int32], [Int32], [Int32])? {
-        var iterator = io_iterator_t()
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMIODevice"), &iterator)
-        if result != kIOReturnSuccess {
-            print("Error find AppleARMIODevice: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
-            return nil
-        }
-        
         var eFreq: [Int32] = []
         var pFreq: [Int32] = []
         var sFreq: [Int32] = []
         
         let isCpuStartFromM4 = platform?.isNewerThanOrEqual(.m4) ?? false
         let isM5GenOrNewer = platform?.isNewerThanOrEqual(.m5) ?? false
+        let isM6GenOrNewer = platform?.isNewerThanOrEqual(.m6) ?? false
+        let names = isM6GenOrNewer ? ["pmgr", "pmgr-child"] : ["pmgr"]
         
-        while case let child = IOIteratorNext(iterator), child != 0 {
-            defer { IOObjectRelease(child) }
-            guard let name = getIOName(child), name == "pmgr", let props = getIOProperties(child) else { continue }
+        for name in names {
+            var iterator = io_iterator_t()
+            let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceNameMatching(name), &iterator)
+            if result != kIOReturnSuccess {
+                print("Error find \(name): " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+                continue
+            }
+            defer { IOObjectRelease(iterator) }
             
-            if isM5GenOrNewer {
-                if let data = props.value(forKey: "voltage-states1-sram") {
-                    eFreq = convertCFDataToArr(data as! CFData, isCpuStartFromM4)
+            while case let child = IOIteratorNext(iterator), child != 0 {
+                defer { IOObjectRelease(child) }
+                guard let props = getIOProperties(child) else { continue }
+                
+                if let data = props.value(forKey: "voltage-states1-sram") as? Data {
+                    eFreq = convertCFDataToArr(data as CFData, isCpuStartFromM4)
                 }
-                if let data = props.value(forKey: "voltage-states22-sram") {
-                    pFreq = convertCFDataToArr(data as! CFData, isCpuStartFromM4)
-                }
-                if let data = props.value(forKey: "voltage-states5-sram") {
-                    sFreq = convertCFDataToArr(data as! CFData, isCpuStartFromM4)
-                }
-            } else {
-                if let data = props.value(forKey: "voltage-states1-sram") {
-                    eFreq = convertCFDataToArr(data as! CFData, isCpuStartFromM4)
-                }
-                if let data = props.value(forKey: "voltage-states5-sram") {
-                    pFreq = convertCFDataToArr(data as! CFData, isCpuStartFromM4)
+                if isM5GenOrNewer {
+                    if let data = props.value(forKey: "voltage-states22-sram") as? Data {
+                        pFreq = convertCFDataToArr(data as CFData, isCpuStartFromM4)
+                    }
+                    if let data = props.value(forKey: "voltage-states5-sram") as? Data {
+                        sFreq = convertCFDataToArr(data as CFData, isCpuStartFromM4)
+                    }
+                } else {
+                    if let data = props.value(forKey: "voltage-states5-sram") as? Data {
+                        pFreq = convertCFDataToArr(data as CFData, isCpuStartFromM4)
+                    }
                 }
             }
+        }
+        
+        // Use the shared cluster table when M6 has no separate performance table.
+        if isM6GenOrNewer && pFreq.isEmpty {
+            pFreq = sFreq
         }
         
         return (eFreq, pFreq, sFreq)
@@ -626,6 +664,15 @@ public class SystemKit {
                     if bootDisk.id != nil {
                         bootableDisks.append(bootDisk)
                     }
+                }
+            }
+        }
+        
+        if let id = disk_s.startupVolumeGroupID {
+            let startupIDs = [disk_s.startupDiskInfo?["DiskUUID"] as? String, disk_s.startupDiskInfo?["DeviceNode"] as? String].compactMap { $0 }
+            for i in bootableDisks.indices {
+                if let currentID = bootableDisks[i].id, startupIDs.contains(currentID) {
+                    bootableDisks[i].id = id
                 }
             }
         }
@@ -791,8 +838,6 @@ public class SystemKit {
                     return .m4Pro
                 } else if name.contains("max") {
                     return .m4Max
-                } else if name.contains("ultra") {
-                    return .m4Ultra
                 } else {
                     return .m4
                 }
@@ -806,6 +851,16 @@ public class SystemKit {
                 } else {
                     return .m5
                 }
+            } else if name.contains("m6") {
+                if name.contains("pro") {
+                    return .m6Pro
+                } else if name.contains("max") {
+                    return .m6Max
+                } else {
+                    return .m6
+                }
+            } else if name.contains("a18 pro") {
+                return .a18Pro
             }
         }
         return nil
@@ -885,6 +940,8 @@ let deviceDict: [String: model_s] = [
     "Mac14,12": model_s(name: "Mac mini (M2 Pro)", year: 2023, type: .macMini),
     "Mac16,10": model_s(name: "Mac mini (M4)", year: 2024, type: .macMini),
     "Mac16,11": model_s(name: "Mac mini (M4 Pro)", year: 2024, type: .macMini),
+    "Mac17,16": model_s(name: "Mac mini (M5 Pro)", year: 2026, type: .macMini),
+    "Mac18,5": model_s(name: "Mac mini (M6)", year: 2026, type: .macMini),
     
     // Mac Studio
     "Mac13,1": model_s(name: "Mac Studio (M1 Max)", year: 2022, type: .macStudio),
@@ -893,6 +950,8 @@ let deviceDict: [String: model_s] = [
     "Mac14,14": model_s(name: "Mac Studio (M2 Ultra)", year: 2023, type: .macStudio),
     "Mac15,14": model_s(name: "Mac Studio (M3 Ultra)", year: 2025, type: .macStudio),
     "Mac16,9": model_s(name: "Mac Studio (M4 Max)", year: 2025, type: .macStudio),
+    "Mac17,14": model_s(name: "Mac Studio (M5 Max)", year: 2026, type: .macStudio),
+    "Mac17,15": model_s(name: "Mac Studio (M5 Ultra)", year: 2026, type: .macStudio),
     
     // Mac Pro
     "MacPro1,1": model_s(name: "Mac Pro", year: 2006, type: .macPro),
@@ -933,6 +992,7 @@ let deviceDict: [String: model_s] = [
     "Mac15,5": model_s(name: "iMac 24-Inch (M3, 8 CPU/10 GPU)", year: 2023, type: .iMac),
     "Mac16,2": model_s(name: "iMac 24-Inch (M4, 8 CPU/8 GPU)", year: 2024, type: .iMac),
     "Mac16,3": model_s(name: "iMac 24-Inch (M4, 10 CPU/10 GPU)", year: 2024, type: .iMac),
+    "Mac18,2": model_s(name: "iMac 24-Inch (M6)", year: 2026, type: .iMac),
     
     // iMac Pro
     "iMacPro1,1": model_s(name: "iMac Pro", year: 2017, type: .iMacPro),
@@ -1029,6 +1089,7 @@ let deviceDict: [String: model_s] = [
     "Mac15,8": model_s(name: "MacBook Pro 14\" (M3 Max)", year: 2023, type: .macbookPro),
     "Mac15,9": model_s(name: "MacBook Pro 16\" (M3 Max)", year: 2023, type: .macbookPro),
     "Mac15,10": model_s(name: "MacBook Pro 14\" (M3 Max)", year: 2023, type: .macbookPro),
+    "Mac15,11": model_s(name: "MacBook Pro 16\" (M3 Max)", year: 2023, type: .macbookPro),
     "Mac16,1": model_s(name: "MacBook Pro 14\" (M4)", year: 2024, type: .macbookPro),
     "Mac16,5": model_s(name: "MacBook Pro 16\" (M4 Max)", year: 2024, type: .macbookPro),
     "Mac16,6": model_s(name: "MacBook Pro 14\" (M4 Max)", year: 2024, type: .macbookPro),
@@ -1038,7 +1099,12 @@ let deviceDict: [String: model_s] = [
     "Mac17,6": model_s(name: "MacBook Pro 16\" (M5 Max)", year: 2026, type: .macbookPro),
     "Mac17,7": model_s(name: "MacBook Pro 14\" (M5 Max)", year: 2026, type: .macbookPro),
     "Mac17,8": model_s(name: "MacBook Pro 16\" (M5 Pro)", year: 2026, type: .macbookPro),
-    "Mac17,9": model_s(name: "MacBook Pro 14\" (M5 Pro)", year: 2026, type: .macbookPro)
+    "Mac17,9": model_s(name: "MacBook Pro 14\" (M5 Pro)", year: 2026, type: .macbookPro),
+    "Mac17,10": model_s(name: "MacBook Pro 16\" PROLED XDR (M5 Max)", year: 2026, type: .macbookPro),
+    "Mac17,11": model_s(name: "MacBook Pro 14\" PROLED XDR (M5 Max)", year: 2026, type: .macbookPro),
+    "Mac17,12": model_s(name: "MacBook Pro 16\" PROLED XDR (M5 Pro)", year: 2026, type: .macbookPro),
+    "Mac17,13": model_s(name: "MacBook Pro 14\" PROLED XDR (M5 Pro)", year: 2026, type: .macbookPro),
+    "Mac18,1": model_s(name: "MacBook Pro 14\" (M6)", year: 2026, type: .macbookPro)
 ]
 
 let osDict: [String: String] = [
