@@ -213,12 +213,17 @@ public class CPU: Module {
         guard let reader = self.processReader else { return }
         guard self.topAppState else {
             reader.popup = true
+            reader.preview = true
             reader.pause()
             // 关闭开关时重置采集计数，重新开启后从第一轮开始计数
             self.topAppCalcQueue.sync { self.topAppCalcCount = 0 }
             return
         }
+        // 上游按需加载重构后 ProcessReader.setup 同时设置了 popup 与 preview。
+        // Reader.start 在两者任一为 true 时只做一次性读取而不启动定时器，
+        // 必须一起置 false 才能让进程采集常驻，否则 top app 标注不再刷新
         reader.popup = false
+        reader.preview = false
         // 先 start 使 reader 进入 active 状态，setInterval 内部仅在 active 时才重建定时器
         reader.start()
         let interval = Store.shared.int(key: "\(self.config.name)_updateTopInterval", defaultValue: 2)
